@@ -155,6 +155,19 @@ The deploy jobs are in this repository. These rules make the secret reach them.
 
 `secrets: inherit` gives the called workflow all the secrets of the caller. That is acceptable here, because the same owner controls both repositories.
 
+### What a real run showed
+
+The first release of `lab-svc-core` (`v0.1.0`) tested these rules.
+
+- The caller had `secrets: inherit` and no repository secret named `AWS_ACCOUNT_ID`. The jobs `deploy-test` and `deploy-staging` each set `environment:` and each logged in to a different account. So the job got the secret of its own environment.
+- `vars.AWS_REGION` was the repository variable of the caller. The caller passed nothing for it.
+- The `github-deploy` role accepted the OIDC token of a job that is defined in this repository. Its trust policy allows only `lab-*` repositories in the matching environment. So the `sub` claim named the caller repository and the environment.
+- `deploy-production` stopped in the state `waiting` for the required reviewer of the caller repository.
+- The log showed the account ID as `***`, also in the stack ARN that `cdk deploy` prints.
+- The Lambda function had the same `CodeSha256` in the Test account and in the Staging account.
+
+One rule comes only from the GitHub documentation: the secret is an empty string if the caller does not pass it. The lab did not test a caller with no `secrets: inherit`.
+
 ## Two releases at the same time
 
 The `concurrency` block in the caller makes a second release wait for the first one.
