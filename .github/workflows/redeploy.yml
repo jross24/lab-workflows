@@ -1,0 +1,87 @@
+name: redeploy
+
+# The rollback path. It deploys the cloud assembly of an old release again. It does not build.
+# The caller must give these permissions: contents: read, id-token: write.
+# The caller must pass its secrets with "secrets: inherit". The README gives the reason.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The version to deploy, for example 1.2.3.
+        type: string
+        required: true
+      environment:
+        description: The environment to deploy to. One of test, staging, production.
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  # A job that names an environment that does not exist creates it. So this job checks the name first.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.inputs.outputs.version }}
+      tag: ${{ steps.inputs.outputs.tag }}
+      stage: ${{ steps.inputs.outputs.stage }}
+    steps:
+      - id: inputs
+        env:
+          VERSION: ${{ inputs.version }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          version="${VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must have the form 1.2.3."
+            exit 1
+          fi
+          case "$ENVIRONMENT" in
+            test) stage='Test' ;;
+            staging) stage='Staging' ;;
+            production) stage='Production' ;;
+            *)
+              echo "::error::environment must be test, staging or production."
+              exit 1
+              ;;
+          esac
+          {
+            echo "version=${version}"
+            echo "tag=v${version}"
+            echo "stage=${stage}"
+          } >> "$GITHUB_OUTPUT"
+
+  redeploy:
+    needs: [check]
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+    steps:
+      # The lockfile of the old release pins the CDK CLI that made the assembly.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.check.outputs.tag }}
+          persist-credentials: false
+      - id: download
+        name: download the cloud assembly of the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "cdk-out-${TAG}.zip" --pattern "cdk-out-${TAG}.zip.sha256"
+          echo "digest=$(cut -d ' ' -f 1 "cdk-out-${TAG}.zip.sha256")" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - uses: jross24/lab-workflows/actions/deploy@main
+        with:
+          assembly: cdk-out-${{ needs.check.outputs.tag }}.zip
+          digest: ${{ steps.download.outputs.digest }}
+          stage: ${{ needs.check.outputs.stage }}
+          version: ${{ needs.check.outputs.version }}

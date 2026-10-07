@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: test the next-version script
+        run: bash actions/next-version/test.sh
+      # The two linters run only if the runner image has them. This repository installs nothing.
+      - name: shellcheck
+        run: |
+          if command -v shellcheck > /dev/null; then
+            shellcheck actions/*/*.sh
+          else
+            echo "::notice::shellcheck is not on this runner. Skipped."
+          fi
+      - name: actionlint
+        run: |
+          if command -v actionlint > /dev/null; then
+            actionlint
+          else
+            echo "::notice::actionlint is not on this runner. Skipped."
+          fi

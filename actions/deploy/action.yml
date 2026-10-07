@@ -1,0 +1,71 @@
+name: deploy
+description: Deploys one stage from the cloud assembly that the build job made. It does not synthesise.
+
+# The job must do these things first:
+# - check out the commit of the release, for package-lock.json
+# - put the zipped cloud assembly on the disk
+# - log in to AWS
+inputs:
+  assembly:
+    description: The path of the zipped cloud assembly.
+    required: true
+  digest:
+    description: The SHA-256 of the zip that the build job made.
+    required: true
+  stage:
+    description: The CDK stage to deploy, for example Test.
+    required: true
+  version:
+    description: The version that the deployed stack must report.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: 22
+        cache: npm
+
+    # The lockfile pins the CDK CLI. A deploy runs no package code, so it needs no install scripts.
+    - shell: bash
+      run: npm ci --ignore-scripts
+
+    - name: check that this is the assembly of the build job
+      shell: bash
+      env:
+        ASSEMBLY: ${{ inputs.assembly }}
+        DIGEST: ${{ inputs.digest }}
+      run: |
+        actual="$(sha256sum "$ASSEMBLY" | cut -d ' ' -f 1)"
+        if [[ "$actual" != "$DIGEST" ]]; then
+          echo "::error::The cloud assembly is not the one that the build job made. Expected sha256 $DIGEST, got $actual."
+          exit 1
+        fi
+        rm -rf cdk.out
+        unzip -q "$ASSEMBLY" -d cdk.out
+
+    - name: cdk deploy
+      shell: bash
+      env:
+        STAGE: ${{ inputs.stage }}
+      run: npx cdk deploy --app cdk.out "${STAGE}/*" --require-approval never --outputs-file "$RUNNER_TEMP/cdk-outputs.json"
+
+    - name: report the deployed version
+      shell: bash
+      env:
+        DIGEST: ${{ inputs.digest }}
+        STAGE: ${{ inputs.stage }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        # The stack has an output named Version. CloudFormation returns it after the deployment.
+        deployed="$(jq -r '[.[] | .Version // empty] | unique | join(", ")' "$RUNNER_TEMP/cdk-outputs.json")"
+        if [[ "$deployed" != "$VERSION" ]]; then
+          echo "::error::Stage $STAGE reports version \"$deployed\", but the release is $VERSION."
+          exit 1
+        fi
+        {
+          echo "### $STAGE runs version $deployed"
+          echo
+          echo "Cloud assembly sha256: \`$DIGEST\`"
+        } >> "$GITHUB_STEP_SUMMARY"
