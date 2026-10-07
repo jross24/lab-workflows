@@ -54,6 +54,8 @@ check 'run url of a holder' 'https://github.com/jross24/lab-svc-core/actions/run
 
 check 'expiry is now plus the minutes' '1001800' "$(expiry_epoch 1000000 30)"
 check 'expiry of one minute' '1000060' "$(expiry_epoch 1000000 1)"
+check 'expiry reads 08 as decimal 8, not as a bad octal number' '1000480' "$(expiry_epoch 1000000 08)"
+check 'expiry reads 010 as decimal 10, not as octal 8' '1000600' "$(expiry_epoch 1000000 010)"
 check 'expiry rejects 0 minutes' 'failed' "$(expiry_epoch 1000000 0 2> /dev/null || echo failed)"
 check 'expiry rejects minutes that are not a number' 'failed' "$(expiry_epoch 1000000 soon 2> /dev/null || echo failed)"
 check 'expiry rejects an empty time' 'failed' "$(expiry_epoch '' 30 2> /dev/null || echo failed)"
@@ -67,6 +69,10 @@ check 'duration of a minute and more' '1 min 30 s' "$(format_duration 90)"
 check 'duration of an hour' '60 min 0 s' "$(format_duration 3600)"
 
 check 'integer check accepts the minimum' 'ok' "$(require_int x 0 0 2> /dev/null && echo ok)"
+check 'integer check accepts 08 and 09' 'ok' "$(require_int x 08 1 2>&1 && require_int x 09 1 2>&1 && echo ok)"
+check 'integer check rejects 00 as below the minimum' 'failed' "$(require_int x 00 1 2> /dev/null || echo failed)"
+check 'integer check accepts an epoch time of 10 digits' 'ok' "$(require_int x 1790000000 0 2> /dev/null && echo ok)"
+check 'integer check rejects a number with more than 12 digits' 'failed' "$(require_int x 1234567890123 0 2> /dev/null || echo failed)"
 check 'integer check rejects below the minimum' 'failed' "$(require_int x 0 1 2> /dev/null || echo failed)"
 check 'integer check rejects a negative number' 'failed' "$(require_int x -5 0 2> /dev/null || echo failed)"
 check 'integer check rejects text' 'failed' "$(require_int x '1 2' 0 2> /dev/null || echo failed)"
@@ -243,6 +249,19 @@ contains 'the call used the condition without the TTL' "put-item $ACQUIRE_CONDIT
 reset
 LOCK_TIMEOUT_MINUTES=5 run_command acquire
 check 'the timeout input sets the expiry' '1000300' "$(stored_expires)"
+
+reset
+LOCK_TIMEOUT_MINUTES='' run_command acquire
+check 'an empty timeout uses the default of 40 minutes' '1002400' "$(stored_expires)"
+
+reset
+LOCK_TIMEOUT_MINUTES=010 run_command acquire
+check 'a timeout with a leading zero is decimal' '0 1000600' "$status $(stored_expires)"
+
+reset
+set_lock 'jross24/lab-svc-core#77#1' 1000000 1000020
+LOCK_POLL_SECONDS=08 run_command acquire
+check 'a poll of 08 seconds works and does not stop the loop' '0 24 3' "$status $PAUSED $PAUSES"
 
 reset
 set_lock 'jross24/lab-svc-core#77#1' 999900 1000100

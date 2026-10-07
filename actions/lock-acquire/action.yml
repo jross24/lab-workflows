@@ -11,8 +11,8 @@ inputs:
     description: The value of the key lockId. It names the environment that the lock protects.
     default: test-environment
   timeout-minutes:
-    description: The time after which the lock ends by itself, if nobody releases it. This is the safety valve.
-    default: '30'
+    description: The time after which the lock ends by itself, if nobody releases it. This is the safety valve. The default of 40 minutes is longer than the longest release (24 minutes). The README has the numbers.
+    default: '40'
   max-wait-minutes:
     description: The longest time to wait for another release. Then the action fails.
     default: '20'

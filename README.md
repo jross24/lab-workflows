@@ -47,17 +47,17 @@ You can also compare the result in AWS. The `CodeSha256` of the Lambda function 
 4. `deploy-test` deploys the stage `Test` in the GitHub environment `test`.
 5. `e2e` runs the end-to-end suite of [lab-e2e](https://github.com/jross24/lab-e2e) against Test.
 6. `unlock-test` releases the lock. It runs after a pass, after a failure and after a cancel.
-7. `deploy-staging` deploys the stage `Staging` in the GitHub environment `staging`. It starts only if `e2e` passed.
+7. `deploy-staging` deploys the stage `Staging` in the GitHub environment `staging`. It starts only if `e2e` passed. With `run-e2e: false` it starts after `deploy-test` passed.
 8. `deploy-production` deploys the stage `Production` in the GitHub environment `production`.
 
-`e2e-summary` also runs. It writes the versions that the E2E run tested into the summary of the release.
+`e2e-summary` runs when `e2e` ran. It writes the versions that the E2E run tested into the summary of the release. With `run-e2e: false` it does not run.
 
 ```
 version -> build -> lock-test -> deploy-test -> e2e -> unlock-test
                                                   \-> deploy-staging -> deploy-production
 ```
 
-Each deploy job starts only after the jobs before it passed.
+Each deploy job starts only after the jobs before it passed. With `run-e2e: false`, `deploy-staging` accepts the skipped `e2e` job, but only after `deploy-test` passed.
 If the `production` environment has a required reviewer, `deploy-production` waits until that person approves it.
 
 ### How the version is chosen
@@ -80,6 +80,7 @@ If the suite fails, `deploy-staging` does not start, so the release stops.
 
 `e2e-summary` writes the exact versions that the suite tested into the summary of the release.
 The summary of the E2E job itself also lists them, with the commit of lab-e2e.
+When the suite fails, the called workflow may give no outputs to `e2e-summary`. The lab has not checked this, and the GitHub documentation does not say. In that case `e2e-summary` writes "not recorded". The summary of the E2E job still lists the versions.
 
 ### The input `run-e2e`
 
@@ -123,6 +124,7 @@ lab-web deploys. Then lab-svc-catalogue deploys over it. The suite of lab-web no
 If the suite fails, nobody can tell which change broke it.
 
 So the releases must use Test one at a time. A release holds the lock from before `deploy-test` until after the E2E suite.
+The lock covers the path of `release.yml` only. `redeploy.yml` can also deploy to Test, and it takes no lock. See "What the lock does not solve".
 
 ### Why a concurrency group does not work
 
@@ -146,7 +148,7 @@ The table `lab-test-lock` has the partition key `lockId`. It has one item, with 
 | --- | --- |
 | `holder` | `<repository>#<run id>#<run attempt>`, for example `jross24/lab-web#123#1` |
 | `acquiredAt` | The start time, in epoch seconds |
-| `expiresAt` | The end time, in epoch seconds. This is the start time plus 30 minutes. |
+| `expiresAt` | The end time, in epoch seconds. This is the start time plus 40 minutes. |
 
 **Acquire** (`actions/lock-acquire`) writes the item with a conditional `PutItem`. The condition is:
 
@@ -168,9 +170,26 @@ If the item is gone, or another run holds it, the action prints a warning and su
 | --- | --- | --- |
 | `table` | `lab-test-lock` | The DynamoDB table. |
 | `lock-id` | `test-environment` | The key of the item. |
-| `timeout-minutes` (acquire) | `30` | The lock ends by itself after this time. |
+| `timeout-minutes` (acquire) | `40` | The lock ends by itself after this time. |
 | `max-wait-minutes` (acquire) | `20` | The longest wait for another release. |
 | `poll-seconds` (acquire) | `15` | The time between two tries. |
+
+#### The time budget of the lock
+
+The lock must last longer than the longest release. If it ends too early, another release takes Test while this release still uses it.
+The longest time that a release can hold Test is the sum of the limits of the jobs:
+
+| Part | Limit |
+| --- | --- |
+| `deploy-test` (the `timeout-minutes` of the job in `release.yml`) | 10 minutes |
+| The job `suite` of `run.yml` in lab-e2e (its `timeout-minutes`) | 12 minutes |
+| The small jobs (`check` in `run.yml`) and the start of the runners | about 2 minutes |
+| **Longest hold** | **24 minutes** |
+| The lock (`timeout-minutes` of `lock-acquire`) | 40 minutes |
+| **Margin** | **16 minutes** |
+
+A normal release needs a few minutes. If you change one limit, calculate the sum again.
+The wait of a release that queues is 20 minutes. A healthy holder can take up to 24 minutes in the worst case, so a waiting release can fail while the holder is still healthy. Then someone must start the release again.
 
 The job that calls an action must log in to AWS first. The role `github-deploy` of the Test account can put, get and delete items in this table.
 The code is the bash script `actions/lock/lock.sh`. Both actions call it. Run its tests with `bash actions/lock/test.sh`.
@@ -182,11 +201,11 @@ The code is the bash script `actions/lock/lock.sh`. Both actions call it. Run it
 | `deploy-test` fails | `e2e` is skipped. `unlock-test` still runs and releases the lock. `deploy-staging` does not start. |
 | The E2E suite fails | `unlock-test` runs and releases the lock. `deploy-staging` does not start. |
 | `lock-test` cannot get the lock in 20 minutes | The job fails. `deploy-test` does not run. `unlock-test` runs, finds that another run holds the lock, and warns. |
-| Someone cancels the run | The expression `always()` "causes the step to always execute, and returns true, even when canceled". `unlock-test` has `if: always()`, so it still runs. The cancel reference says that GitHub ends all jobs that still run 5 minutes after the cancel, so the job must be short. It is short. That page describes jobs that already run. It does not describe a job that still waits for its `needs`. The lab has not tested this case. |
-| A runner dies, or GitHub force-cancels the run | `unlock-test` may not run. The lock ends by itself after 30 minutes. This is the safety valve. |
-| `deploy-test` hangs | The job limit is 15 minutes, less than the 30 minutes of the lock. So the job ends before the lock expires. |
-| The lock expires while a release still uses Test | Another release can take the lock. Both then use Test. The limits of the jobs (15 minutes for `deploy-test`, 12 minutes for the suite) make this unlikely. |
-| A person starts "Re-run failed jobs" after a failed E2E suite | See the limits below. |
+| Someone cancels the run | The expression `always()` "causes the step to always execute, and returns true, even when canceled". `unlock-test` has the condition `always() && needs.lock-test.result != 'skipped'`, so it still runs after a cancel, if the job `lock-test` ran. The cancel reference says that GitHub ends all jobs that still run 5 minutes after the cancel, so the job must be short. It is short. That page describes jobs that already run. It does not describe a job that still waits for its `needs`. The lab has not tested this case. |
+| A runner dies, or GitHub force-cancels the run | `unlock-test` may not run. The lock ends by itself after 40 minutes. This is the safety valve. |
+| `deploy-test` hangs | The job limit is 10 minutes, less than the 40 minutes of the lock. So the job ends before the lock expires. |
+| The lock expires while a release still uses Test | Another release can take the lock. Both then use Test. The time budget above (24 minutes at most for 40 minutes of lock) makes this unlikely. |
+| A person starts "Re-run failed jobs" after a failed `deploy-test` or a failed E2E suite | The re-run uses Test without the lock. See the limits below. |
 
 Cancel and force-cancel are from the documentation. The lab has not tested them.
 
@@ -202,8 +221,9 @@ To close this gap, a team must promote a whole set of versions, or use contract 
 Other limits:
 
 - **The lock is not a queue.** Waiting releases poll. The release that polls first after the lock ends wins. There is no order and no fairness.
-- **The clock of the runner decides.** The expiry compares the clocks of different runners. GitHub synchronises them, and the margin is 30 minutes, so a few seconds of drift do not matter.
-- **A release that runs again with "Re-run failed jobs" after a failed E2E suite does not take the lock again.** The job `lock-test` passed, so GitHub does not run it again. `unlock-test` released the lock in the first attempt. The second `e2e` run then uses Test without the lock. See [lab-platform#19](https://github.com/jross24/lab-platform/issues/19).
+- **The clock of the runner decides.** The expiry compares the clocks of different runners. GitHub synchronises them, and the margin is 16 minutes, so a few seconds of drift do not matter.
+- **A release that runs again with "Re-run failed jobs" does not take the lock again.** This holds after a failed `deploy-test` and after a failed E2E suite. The job `lock-test` passed, so GitHub does not run it again. `unlock-test` released the lock in the first attempt. The re-run of `deploy-test` or of `e2e` then changes or uses Test without the lock. See [lab-platform#19](https://github.com/jross24/lab-platform/issues/19).
+- **A redeploy to Test takes no lock.** `redeploy.yml` can deploy to `test`, for a rollback. It can change Test while a release holds the lock, and then the E2E suite of that release tests a different version. See [lab-platform#24](https://github.com/jross24/lab-platform/issues/24).
 - **A run that lab-e2e starts itself** (a push to its `main`, the nightly schedule or a manual run) does not take the lock. A release that deploys to Test at the same time can disturb it. See [lab-platform#19](https://github.com/jross24/lab-platform/issues/19).
 - **The lock covers Test only.** Staging and Production have no lock table.
 
@@ -212,7 +232,7 @@ Other limits:
 A lock makes the releases queue. This has a cost:
 
 - One slow or stuck release delays every team. The wait is up to 20 minutes, and then the next release fails and someone must start it again.
-- The expiry is the safety valve. It frees a lock that a dead run holds. The price is a wait of up to 30 minutes after a crash.
+- The expiry is the safety valve. It frees a lock that a dead run holds. The price is a wait of up to 40 minutes after a crash. A release that waits for 20 minutes fails before that, and someone must start it again.
 - Every release now needs the lock table, SSM and the E2E repository. More parts can fail.
 
 The alternative is a Test environment for each team or for each change. That costs more, but it needs no queue.
@@ -227,6 +247,7 @@ The alternative is a Test environment for each team or for each change. That cos
 | The lock between two real releases | **Not tested.** See the steps below. |
 | `unlock-test` after a failed E2E suite, a failed deploy and a cancel | **Not tested** in Actions. |
 | The nested call `release.yml` -> `run.yml` (environment, secrets, OIDC identity) | **Not tested.** It follows the documentation. |
+| The outputs of the E2E job reach `e2e-summary` when the suite fails | **Not verified.** The documentation does not say. `e2e-summary` writes "not recorded" for an empty output. |
 | A concurrency group is limited to one repository | From the documentation. Not tested. |
 
 ### How to prove it in Actions
@@ -272,7 +293,7 @@ The queue is free when the four waiting releases at `deploy-production` have an 
 
 7. The check of a failed suite: merge a change to lab-e2e that makes one test fail on purpose (for example, a test that expects the version `9.9.9` of web). Then release one service. `e2e` must fail, `unlock-test` must succeed, `deploy-staging` must be skipped, and `get-item` must return no item. Then revert the change in lab-e2e. This stops the gate for all teams while it is in place, so do it when nobody releases.
 
-8. The check of a cancel: start a release, cancel it while `e2e` runs, and check that `unlock-test` ran and `get-item` returns no item. If `unlock-test` did not run, the item must be gone 30 minutes after `acquiredAt`.
+8. The check of a cancel: start a release, cancel it while `e2e` runs, and check that `unlock-test` ran and `get-item` returns no item. If `unlock-test` did not run, the item must be gone 40 minutes after `acquiredAt`.
 
 ## The redeploy workflow
 
