@@ -72,6 +72,27 @@ If the `production` environment has a required reviewer, `deploy-production` wai
 If the commit already has a version tag, the action gives that version again. So you can run a failed release again.
 The logic is a bash script. Run its tests with `bash actions/next-version/test.sh`.
 
+### The time limit of each job
+
+Each job that waits for something outside the runner has a `timeout-minutes` limit. A hung job then ends and frees the release queue.
+
+| Job | Limit | Why |
+| --- | --- | --- |
+| `lock-test` | 25 minutes | The wait for the Test lock is 20 minutes at most. |
+| `deploy-test` | 10 minutes | Part of the time budget of the lock (see "The time budget of the lock"). |
+| `unlock-test` | 5 minutes | A short job. GitHub ends a cancelled job after 5 minutes. |
+| `deploy-staging` | 15 minutes | Like Test, plus room. |
+| `deploy-production` | 30 minutes | See below. |
+| `redeploy` (in `redeploy.yml`) | 30 minutes | It can deploy to production. |
+
+A service can release with CodeDeploy: the traffic of a Lambda alias moves to the new version in steps, and an alarm rolls it back.
+CloudFormation waits for the CodeDeploy deployment, so the job `cdk deploy` waits too. A canary of "10 percent for 5 minutes" alone takes 5 minutes.
+The limit of `deploy-production` is 30 minutes. It leaves room for the stack update, for the canary and for a rollback of the traffic and of the stack.
+A job that waits for a required reviewer has not started, so that wait does not count against the limit.
+
+The limit of `deploy-test` did not change. The stage Test and the stage Staging move the traffic all at once, which adds a short time.
+The lock budget is therefore the same as before.
+
 ## The end-to-end gate
 
 After `deploy-test`, the job `e2e` calls the workflow `run.yml` of [lab-e2e](https://github.com/jross24/lab-e2e) for the environment `test`.
@@ -302,6 +323,7 @@ It downloads the zip of that version from the GitHub release. It checks the zip 
 Then it deploys the zip to that environment. It does not build.
 
 Use it to go back to an old version. The old version is the old artefact, not a new build of old code.
+For a service that releases in steps, a redeploy moves the traffic in steps too. A redeploy to `production` takes more than 5 minutes.
 The rules of the GitHub environment apply to a redeploy too. A redeploy to `production` waits for the reviewer.
 
 ## Use the pipeline in a service repository
