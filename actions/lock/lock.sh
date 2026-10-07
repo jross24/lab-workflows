@@ -13,6 +13,9 @@ set -euo pipefail
 readonly DEFAULT_TABLE='lab-test-lock'
 readonly DEFAULT_LOCK_ID='test-environment'
 
+# The lock ends by itself after this time. The README has the time budget behind this number.
+readonly DEFAULT_TIMEOUT_MINUTES=40
+
 # The exit code of try_put when the lock belongs to another run.
 readonly HELD=10
 
@@ -21,9 +24,12 @@ readonly HELD=10
 # ---------------------------------------------------------------------------
 
 # require_int <name> <value> <minimum>
+# Bash reads a number with a leading zero as octal. So 08 is an error and 010 is 8.
+# The prefix 10# makes the comparison decimal. The limit of 12 digits keeps the arithmetic safe.
+# Every function below that does arithmetic with a checked value uses the prefix 10# too.
 require_int() {
   local name="$1" value="${2:-}" minimum="$3"
-  if [[ ! "$value" =~ ^[0-9]+$ ]] || ((value < minimum)); then
+  if [[ ! "$value" =~ ^[0-9]{1,12}$ ]] || ((10#$value < minimum)); then
     echo "lock: $name must be a whole number of at least $minimum, but it is \"$value\"" >&2
     return 1
   fi
@@ -74,13 +80,13 @@ holder_run_url() {
 expiry_epoch() {
   require_int 'now' "${1:-}" 0 || return 1
   require_int 'minutes' "${2:-}" 1 || return 1
-  echo $(($1 + $2 * 60))
+  echo $((10#$1 + 10#$2 * 60))
 }
 
 # seconds_between <later> <earlier>
 # The number of seconds from the earlier time to the later time. Zero when the later time is not later.
 seconds_between() {
-  local difference=$(($1 - $2))
+  local difference=$((10#$1 - 10#$2))
   echo $((difference > 0 ? difference : 0))
 }
 
@@ -224,7 +230,7 @@ acquire() {
   local table lock_id timeout_minutes max_wait_minutes poll_seconds holder
   table="${LOCK_TABLE:-$DEFAULT_TABLE}"
   lock_id="${LOCK_ID:-$DEFAULT_LOCK_ID}"
-  timeout_minutes="${LOCK_TIMEOUT_MINUTES:-30}"
+  timeout_minutes="${LOCK_TIMEOUT_MINUTES:-$DEFAULT_TIMEOUT_MINUTES}"
   max_wait_minutes="${LOCK_MAX_WAIT_MINUTES:-20}"
   poll_seconds="${LOCK_POLL_SECONDS:-15}"
 
@@ -234,6 +240,11 @@ acquire() {
   require_int 'LOCK_MAX_WAIT_MINUTES' "$max_wait_minutes" 0 || return 1
   require_int 'LOCK_POLL_SECONDS' "$poll_seconds" 1 || return 1
   holder="$(holder_id "${GITHUB_REPOSITORY:-}" "${GITHUB_RUN_ID:-}" "${GITHUB_RUN_ATTEMPT:-}")" || return 1
+
+  # The values are checked. Make them plain decimal numbers, so 08 is 8 in all the arithmetic below.
+  timeout_minutes=$((10#$timeout_minutes))
+  max_wait_minutes=$((10#$max_wait_minutes))
+  poll_seconds=$((10#$poll_seconds))
 
   local started deadline now expires status previous remaining
   started="$(now_epoch)"
