@@ -1,0 +1,39 @@
+name: lock acquire
+description: Takes the lock of the shared Test environment. Waits when another release holds it. Fails when the wait is over.
+
+# The job must log in to AWS first, with a role that can put and get items in the lock table.
+# The holder is "<repository>#<run id>#<run attempt>". The README explains the lock.
+inputs:
+  table:
+    description: The name of the DynamoDB table.
+    default: lab-test-lock
+  lock-id:
+    description: The value of the key lockId. It names the environment that the lock protects.
+    default: test-environment
+  timeout-minutes:
+    description: The time after which the lock ends by itself, if nobody releases it. This is the safety valve.
+    default: '30'
+  max-wait-minutes:
+    description: The longest time to wait for another release. Then the action fails.
+    default: '20'
+  poll-seconds:
+    description: The time between two tries.
+    default: '15'
+
+outputs:
+  holder:
+    description: The holder text that this run wrote into the lock.
+    value: ${{ steps.acquire.outputs.holder }}
+
+runs:
+  using: composite
+  steps:
+    - id: acquire
+      shell: bash
+      env:
+        LOCK_TABLE: ${{ inputs.table }}
+        LOCK_ID: ${{ inputs.lock-id }}
+        LOCK_TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
+        LOCK_MAX_WAIT_MINUTES: ${{ inputs.max-wait-minutes }}
+        LOCK_POLL_SECONDS: ${{ inputs.poll-seconds }}
+      run: bash "$GITHUB_ACTION_PATH/../lock/lock.sh" acquire

@@ -17,6 +17,8 @@ jobs:
           persist-credentials: false
       - name: test the next-version script
         run: bash actions/next-version/test.sh
+      - name: test the lock script
+        run: bash actions/lock/test.sh
       # The two linters run only if the runner image has them. This repository installs nothing.
       - name: shellcheck
         run: |

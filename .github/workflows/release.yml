@@ -3,8 +3,23 @@ name: release
 # The release path of a service repository. Call it on a push to main.
 # The caller must give these permissions: contents: write, id-token: write.
 # The caller must pass its secrets with "secrets: inherit". The README gives the reason.
+#
+# The order of the jobs:
+#   version -> build -> lock-test -> deploy-test -> e2e -> unlock-test
+#                                                      \-> deploy-staging -> deploy-production
+# Test is shared by all the service repositories. A release holds the lock of Test from lock-test
+# to unlock-test. Staging starts only if the E2E suite passed. A failed suite still releases the lock.
 on:
   workflow_call:
+    inputs:
+      run-e2e:
+        description: >-
+          Run the end-to-end suite of lab-e2e against Test after the deployment, and stop the release
+          if it fails. Set it to false only for a repository that has no E2E suite to run.
+          The release still takes the lock of Test.
+        type: boolean
+        required: false
+        default: true
 
 # Each job asks for its own permissions.
 permissions: {}
@@ -85,10 +100,31 @@ jobs:
           gh release create "$TAG" "cdk-out-${TAG}.zip" "cdk-out-${TAG}.zip.sha256" \
             --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag
 
-  deploy-test:
+  # Takes the lock of the shared Test environment. It waits when another release holds the lock.
+  # The wait is 20 minutes at most, so the job limit is a little longer.
+  lock-test:
     needs: [version, build]
     runs-on: ubuntu-latest
     environment: test
+    timeout-minutes: 25
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - uses: jross24/lab-workflows/actions/lock-acquire@main
+
+  # The limit of the job is shorter than the 30 minutes of the lock. So a stuck deployment ends
+  # before the lock expires and another release takes Test.
+  deploy-test:
+    needs: [version, build, lock-test]
+    runs-on: ubuntu-latest
+    environment: test
+    timeout-minutes: 15
     permissions:
       id-token: write
       contents: read
@@ -111,13 +147,83 @@ jobs:
           stage: Test
           version: ${{ needs.version.outputs.version }}
 
-  # ---------------------------------------------------------------------------
-  # PLACEHOLDER: the end-to-end suite goes here in a later phase.
-  # It will run against Test after deploy-test, and deploy-staging will need it.
-  # ---------------------------------------------------------------------------
+  # The end-to-end suite of lab-e2e, against Test. This job is a call of a reusable workflow, so it
+  # cannot set an environment. The job inside run.yml sets it. The README explains which secrets and
+  # which OIDC identity that job gets when a service repository started the release.
+  # "secrets: inherit" is needed at each level. GitHub passes secrets only to the workflow that a job calls.
+  e2e:
+    needs: [deploy-test]
+    if: ${{ inputs.run-e2e }}
+    permissions:
+      id-token: write
+      contents: read
+    uses: jross24/lab-e2e/.github/workflows/run.yml@main
+    with:
+      environment: test
+    secrets: inherit
 
+  # Shows in the summary of the release which versions the E2E suite tested.
+  e2e-summary:
+    needs: [e2e]
+    if: ${{ always() && needs.e2e.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: write the summary
+        env:
+          RESULT: ${{ needs.e2e.result }}
+          WEB: ${{ needs.e2e.outputs.web-version }}
+          CATALOGUE: ${{ needs.e2e.outputs.catalogue-version }}
+          ACCOUNT: ${{ needs.e2e.outputs.account-version }}
+          CORE: ${{ needs.e2e.outputs.core-version }}
+          E2E_COMMIT: ${{ needs.e2e.outputs.commit }}
+        run: |
+          {
+            echo "### E2E against Test: ${RESULT}"
+            echo
+            if [[ -n "$WEB$CATALOGUE$ACCOUNT$CORE" ]]; then
+              echo "| Application | Version tested |"
+              echo "| --- | --- |"
+              echo "| web | \`${WEB:-not recorded}\` |"
+              echo "| catalogue | \`${CATALOGUE:-not recorded}\` |"
+              echo "| account | \`${ACCOUNT:-not recorded}\` |"
+              echo "| core | \`${CORE:-not recorded}\` |"
+              echo
+            else
+              echo "The E2E run recorded no version."
+              echo
+            fi
+            echo "lab-e2e commit: \`${E2E_COMMIT:-unknown}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Releases the lock of Test. It runs when the suite passed, when it failed, when deploy-test failed
+  # and when the run is cancelled, but not when the lock job never ran. The release of the lock
+  # never fails because of the lock itself. If this job cannot run, the lock expires after 30 minutes.
+  unlock-test:
+    needs: [lock-test, deploy-test, e2e]
+    if: ${{ always() && needs.lock-test.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    environment: test
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - uses: jross24/lab-workflows/actions/lock-release@main
+
+  # Staging needs a passed E2E suite. With run-e2e set to false, a skipped suite is accepted, but only
+  # when Test was deployed. A deploy-test that failed also skips the suite, and that must stop the release.
   deploy-staging:
-    needs: [version, build, deploy-test]
+    needs: [version, build, deploy-test, e2e]
+    if: >-
+      ${{ !cancelled()
+      && needs.deploy-test.result == 'success'
+      && (needs.e2e.result == 'success' || (needs.e2e.result == 'skipped' && !inputs.run-e2e)) }}
     runs-on: ubuntu-latest
     environment: staging
     permissions:

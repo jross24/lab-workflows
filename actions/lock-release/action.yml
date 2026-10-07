@@ -1,0 +1,21 @@
+name: lock release
+description: Releases the lock of the shared Test environment, if this run holds it. It never fails because of the lock.
+
+# The job must log in to AWS first, with a role that can delete items in the lock table.
+# If the lock is gone, or another run holds it, the action prints a warning and succeeds.
+inputs:
+  table:
+    description: The name of the DynamoDB table.
+    default: lab-test-lock
+  lock-id:
+    description: The value of the key lockId. It names the environment that the lock protects.
+    default: test-environment
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        LOCK_TABLE: ${{ inputs.table }}
+        LOCK_ID: ${{ inputs.lock-id }}
+      run: bash "$GITHUB_ACTION_PATH/../lock/lock.sh" release
