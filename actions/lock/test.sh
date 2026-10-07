@@ -30,7 +30,9 @@ contains() {
     echo "ok    $name"
   else
     echo "FAIL  $name: \"$needle\" is not in the output:"
-    echo "$haystack" | sed 's/^/        /'
+    while IFS= read -r line; do
+      echo "        $line"
+    done <<< "$haystack"
     failures=$((failures + 1))
   fi
 }
