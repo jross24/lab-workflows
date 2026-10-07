@@ -124,6 +124,8 @@ jobs:
   # (the limit of the job "suite" in lab-e2e), plus about 2 minutes for the small jobs and the start of
   # the runners. That is 24 minutes, so the margin is 16 minutes. A normal release needs a few minutes.
   # If one of these limits changes, check the sum again.
+  # A service can release in steps with CodeDeploy, and CloudFormation waits for the CodeDeploy deployment.
+  # In Test the deployment moves all the traffic at once, so it adds only a short time. The limit stays 10 minutes.
   deploy-test:
     needs: [version, build, lock-test]
     runs-on: ubuntu-latest
@@ -232,6 +234,8 @@ jobs:
       && (needs.e2e.result == 'success' || (needs.e2e.result == 'skipped' && !inputs.run-e2e)) }}
     runs-on: ubuntu-latest
     environment: staging
+    # Staging moves the traffic all at once, like Test. The limit leaves room for the CodeDeploy deployment.
+    timeout-minutes: 15
     permissions:
       id-token: write
       contents: read
@@ -254,10 +258,15 @@ jobs:
           stage: Staging
           version: ${{ needs.version.outputs.version }}
 
+  # A service can release in steps with CodeDeploy, for example 10 percent of the traffic for 5 minutes and then all of it.
+  # CloudFormation waits for the whole deployment, so this job needs more than 5 minutes. After an alarm, the rollback of the
+  # traffic and the rollback of the stack take more time. The limit of 30 minutes leaves room for both.
+  # The time that the job waits for a reviewer does not count. The limit starts when the job starts.
   deploy-production:
     needs: [version, build, deploy-staging]
     runs-on: ubuntu-latest
     environment: production
+    timeout-minutes: 30
     permissions:
       id-token: write
       contents: read
