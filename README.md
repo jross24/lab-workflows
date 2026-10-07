@@ -197,14 +197,14 @@ The E2E suite tests the versions that are in Test at that time, for example web 
 Each service repository promotes by itself. Staging may hold catalogue 0.1.1 when web 0.2.0 arrives there. Production may hold yet another set.
 So "the suite passed in Test" does not mean "this set of versions works in Staging or in Production".
 The lock only makes the result in Test attributable. It does not pin the set.
-To close this gap, a team must promote a whole set of versions, or use contract tests that check each pair of services on its own.
+To close this gap, a team must promote a whole set of versions, or use contract tests that check each pair of services on its own. See [lab-platform#21](https://github.com/jross24/lab-platform/issues/21).
 
 Other limits:
 
 - **The lock is not a queue.** Waiting releases poll. The release that polls first after the lock ends wins. There is no order and no fairness.
 - **The clock of the runner decides.** The expiry compares the clocks of different runners. GitHub synchronises them, and the margin is 30 minutes, so a few seconds of drift do not matter.
-- **A release that runs again with "Re-run failed jobs" after a failed E2E suite does not take the lock again.** The job `lock-test` passed, so GitHub does not run it again. `unlock-test` released the lock in the first attempt. The second `e2e` run then uses Test without the lock.
-- **A run that lab-e2e starts itself** (a push to its `main`, the nightly schedule or a manual run) does not take the lock. A release that deploys to Test at the same time can disturb it.
+- **A release that runs again with "Re-run failed jobs" after a failed E2E suite does not take the lock again.** The job `lock-test` passed, so GitHub does not run it again. `unlock-test` released the lock in the first attempt. The second `e2e` run then uses Test without the lock. See [lab-platform#19](https://github.com/jross24/lab-platform/issues/19).
+- **A run that lab-e2e starts itself** (a push to its `main`, the nightly schedule or a manual run) does not take the lock. A release that deploys to Test at the same time can disturb it. See [lab-platform#19](https://github.com/jross24/lab-platform/issues/19).
 - **The lock covers Test only.** Staging and Production have no lock table.
 
 ### The trade-off
@@ -231,7 +231,7 @@ The alternative is a Test environment for each team or for each change. That cos
 
 ### How to prove it in Actions
 
-Do this after the permission for SSM (lab-platform) is deployed in all three accounts, and after the release queue is free.
+[lab-platform#20](https://github.com/jross24/lab-platform/issues/20) tracks this work. Do it after the permission for SSM (lab-platform) is deployed in all three accounts, and after the release queue is free.
 The queue is free when the four waiting releases at `deploy-production` have an answer, and no release is running.
 
 1. Run the E2E workflow alone. It proves the login, the SSM read and the suite.
@@ -416,3 +416,4 @@ Actions from other owners are different. This repository pins each of them to a 
 
 The `ci` workflow runs on each pull request. It runs the tests of the next-version script and the tests of the lock script.
 It also runs `shellcheck` and `actionlint`, but only if the runner image already has them. The repository installs no tool.
+The runner image has `shellcheck`. It does not have `actionlint`, so the CI skips it and no tool checks the workflow files. See [lab-platform#22](https://github.com/jross24/lab-platform/issues/22).
