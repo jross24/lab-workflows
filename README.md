@@ -79,7 +79,7 @@ Each job that waits for something outside the runner has a `timeout-minutes` lim
 | Job | Limit | Why |
 | --- | --- | --- |
 | `lock-test` | 25 minutes | The wait for the Test lock is 20 minutes at most. |
-| `deploy-test` | 10 minutes | Part of the time budget of the lock (see "The time budget of the lock"). |
+| `deploy-test` | 15 minutes | Part of the time budget of the lock (see "The time budget of the lock"). It is 15 and not 10 because the first deployment of CloudWatch Transaction Search in an account waits about 6 minutes for the setting. |
 | `unlock-test` | 5 minutes | A short job. GitHub ends a cancelled job after 5 minutes. |
 | `deploy-staging` | 15 minutes | Like Test, plus room. |
 | `deploy-production` | 30 minutes | See below. |
@@ -202,15 +202,15 @@ The longest time that a release can hold Test is the sum of the limits of the jo
 
 | Part | Limit |
 | --- | --- |
-| `deploy-test` (the `timeout-minutes` of the job in `release.yml`) | 10 minutes |
+| `deploy-test` (the `timeout-minutes` of the job in `release.yml`) | 15 minutes |
 | The job `suite` of `run.yml` in lab-e2e (its `timeout-minutes`) | 12 minutes |
 | The small jobs (`check` in `run.yml`) and the start of the runners | about 2 minutes |
-| **Longest hold** | **24 minutes** |
+| **Longest hold** | **29 minutes** |
 | The lock (`timeout-minutes` of `lock-acquire`) | 40 minutes |
-| **Margin** | **16 minutes** |
+| **Margin** | **11 minutes** |
 
 A normal release needs a few minutes. If you change one limit, calculate the sum again.
-The wait of a release that queues is 20 minutes. A healthy holder can take up to 24 minutes in the worst case, so a waiting release can fail while the holder is still healthy. Then someone must start the release again.
+The wait of a release that queues is 20 minutes. A healthy holder can take up to 29 minutes in the worst case, so a waiting release can fail while the holder is still healthy. Then someone must start the release again.
 
 The job that calls an action must log in to AWS first. The role `github-deploy` of the Test account can put, get and delete items in this table.
 The code is the bash script `actions/lock/lock.sh`. Both actions call it. Run its tests with `bash actions/lock/test.sh`.
@@ -224,8 +224,8 @@ The code is the bash script `actions/lock/lock.sh`. Both actions call it. Run it
 | `lock-test` cannot get the lock in 20 minutes | The job fails. `deploy-test` does not run. `unlock-test` runs, finds that another run holds the lock, and warns. |
 | Someone cancels the run | The expression `always()` "causes the step to always execute, and returns true, even when canceled". `unlock-test` has the condition `always() && needs.lock-test.result != 'skipped'`, so it still runs after a cancel, if the job `lock-test` ran. The cancel reference says that GitHub ends all jobs that still run 5 minutes after the cancel, so the job must be short. It is short. That page describes jobs that already run. It does not describe a job that still waits for its `needs`. The lab has not tested this case. |
 | A runner dies, or GitHub force-cancels the run | `unlock-test` may not run. The lock ends by itself after 40 minutes. This is the safety valve. |
-| `deploy-test` hangs | The job limit is 10 minutes, less than the 40 minutes of the lock. So the job ends before the lock expires. |
-| The lock expires while a release still uses Test | Another release can take the lock. Both then use Test. The time budget above (24 minutes at most for 40 minutes of lock) makes this unlikely. |
+| `deploy-test` hangs | The job limit is 15 minutes, less than the 40 minutes of the lock. So the job ends before the lock expires. |
+| The lock expires while a release still uses Test | Another release can take the lock. Both then use Test. The time budget above (29 minutes at most for 40 minutes of lock) makes this unlikely. |
 | A person starts "Re-run failed jobs" after a failed `deploy-test` or a failed E2E suite | The re-run uses Test without the lock. See the limits below. |
 
 Cancel and force-cancel are from the documentation. The lab has not tested them.
@@ -242,7 +242,7 @@ To close this gap, a team must promote a whole set of versions, or use contract 
 Other limits:
 
 - **The lock is not a queue.** Waiting releases poll. The release that polls first after the lock ends wins. There is no order and no fairness.
-- **The clock of the runner decides.** The expiry compares the clocks of different runners. GitHub synchronises them, and the margin is 16 minutes, so a few seconds of drift do not matter.
+- **The clock of the runner decides.** The expiry compares the clocks of different runners. GitHub synchronises them, and the margin is 11 minutes, so a few seconds of drift do not matter.
 - **A release that runs again with "Re-run failed jobs" does not take the lock again.** This holds after a failed `deploy-test` and after a failed E2E suite. The job `lock-test` passed, so GitHub does not run it again. `unlock-test` released the lock in the first attempt. The re-run of `deploy-test` or of `e2e` then changes or uses Test without the lock. See [lab-platform#19](https://github.com/jross24/lab-platform/issues/19).
 - **A redeploy to Test takes no lock.** `redeploy.yml` can deploy to `test`, for a rollback. It can change Test while a release holds the lock, and then the E2E suite of that release tests a different version. See [lab-platform#24](https://github.com/jross24/lab-platform/issues/24).
 - **A run that lab-e2e starts itself** (a push to its `main`, the nightly schedule or a manual run) does not take the lock. A release that deploys to Test at the same time can disturb it. See [lab-platform#19](https://github.com/jross24/lab-platform/issues/19).

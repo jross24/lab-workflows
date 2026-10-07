@@ -120,17 +120,19 @@ jobs:
       - uses: jross24/lab-workflows/actions/lock-acquire@main
 
   # The time budget of the lock. The lock ends 40 minutes after lock-test took it. The longest time that
-  # a release can hold Test is: deploy-test 10 minutes (the limit of this job), plus the suite 12 minutes
+  # a release can hold Test is: deploy-test 15 minutes (the limit of this job), plus the suite 12 minutes
   # (the limit of the job "suite" in lab-e2e), plus about 2 minutes for the small jobs and the start of
-  # the runners. That is 24 minutes, so the margin is 16 minutes. A normal release needs a few minutes.
+  # the runners. That is 29 minutes, so the margin is 11 minutes. A normal release needs a few minutes.
   # If one of these limits changes, check the sum again.
   # A service can release in steps with CodeDeploy, and CloudFormation waits for the CodeDeploy deployment.
-  # In Test the deployment moves all the traffic at once, so it adds only a short time. The limit stays 10 minutes.
+  # In Test the deployment moves all the traffic at once, so it adds only a short time.
+  # The limit is 15 minutes and not 10 for one more reason. The first deployment that turns on CloudWatch Transaction Search
+  # in an account waits until the setting is active. That took 6 minutes in a test account. A normal deployment needs 2 minutes.
   deploy-test:
     needs: [version, build, lock-test]
     runs-on: ubuntu-latest
     environment: test
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       id-token: write
       contents: read
