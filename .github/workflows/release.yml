@@ -1,0 +1,169 @@
+name: release
+
+# The release path of a service repository. Call it on a push to main.
+# The caller must give these permissions: contents: write, id-token: write.
+# The caller must pass its secrets with "secrets: inherit". The README gives the reason.
+on:
+  workflow_call:
+
+# Each job asks for its own permissions.
+permissions: {}
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      tag: ${{ steps.next.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: next
+        uses: jross24/lab-workflows/actions/next-version@main
+      - name: create the tag on the released commit
+        if: steps.next.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.next.outputs.tag }}
+        run: gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f "ref=refs/tags/${TAG}" -f "sha=${GITHUB_SHA}" --silent
+      - name: write the summary
+        env:
+          TAG: ${{ steps.next.outputs.tag }}
+        run: echo "### Release ${TAG} of commit ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
+
+  # The only job that synthesises. Each deploy job uses the cloud assembly from this job.
+  build:
+    needs: [version]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      digest: ${{ steps.zip.outputs.digest }}
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npx cdk synth --quiet -c "version=${VERSION}"
+      - id: zip
+        name: zip the cloud assembly
+        run: |
+          (cd cdk.out && zip --quiet --recurse-paths "../cdk-out-${TAG}.zip" .)
+          sha256sum "cdk-out-${TAG}.zip" > "cdk-out-${TAG}.zip.sha256"
+          digest="$(cut -d ' ' -f 1 "cdk-out-${TAG}.zip.sha256")"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Built ${TAG}"
+            echo
+            echo "Cloud assembly sha256: \`${digest}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cdk-out
+          path: cdk-out-${{ needs.version.outputs.tag }}.zip
+          if-no-files-found: error
+          compression-level: 0
+      # The release keeps the assembly, so the redeploy workflow can deploy this version again later.
+      - name: attach the cloud assembly to a GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" "cdk-out-${TAG}.zip" "cdk-out-${TAG}.zip.sha256" \
+            --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag
+
+  deploy-test:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    environment: test
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cdk-out
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - uses: jross24/lab-workflows/actions/deploy@main
+        with:
+          assembly: cdk-out-${{ needs.version.outputs.tag }}.zip
+          digest: ${{ needs.build.outputs.digest }}
+          stage: Test
+          version: ${{ needs.version.outputs.version }}
+
+  # ---------------------------------------------------------------------------
+  # PLACEHOLDER: the end-to-end suite goes here in a later phase.
+  # It will run against Test after deploy-test, and deploy-staging will need it.
+  # ---------------------------------------------------------------------------
+
+  deploy-staging:
+    needs: [version, build, deploy-test]
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cdk-out
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - uses: jross24/lab-workflows/actions/deploy@main
+        with:
+          assembly: cdk-out-${{ needs.version.outputs.tag }}.zip
+          digest: ${{ needs.build.outputs.digest }}
+          stage: Staging
+          version: ${{ needs.version.outputs.version }}
+
+  deploy-production:
+    needs: [version, build, deploy-staging]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cdk-out
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - uses: jross24/lab-workflows/actions/deploy@main
+        with:
+          assembly: cdk-out-${{ needs.version.outputs.tag }}.zip
+          digest: ${{ needs.build.outputs.digest }}
+          stage: Production
+          version: ${{ needs.version.outputs.version }}

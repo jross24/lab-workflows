@@ -1,0 +1,21 @@
+name: next version
+description: Works out the next semantic version from the commit titles since the last v* tag.
+
+# The caller must check out the repository with the full history and the tags (fetch-depth: 0).
+outputs:
+  version:
+    description: The next version, for example 1.2.3.
+    value: ${{ steps.next.outputs.version }}
+  tag:
+    description: The tag of the next version, for example v1.2.3.
+    value: ${{ steps.next.outputs.tag }}
+  exists:
+    description: The text true if the checked-out commit already has this tag.
+    value: ${{ steps.next.outputs.exists }}
+
+runs:
+  using: composite
+  steps:
+    - id: next
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/next-version.sh"
