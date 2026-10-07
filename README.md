@@ -3,15 +3,17 @@
 This repository holds the shared pipeline of the pipeline lab.
 A service repository does not copy the pipeline. It calls the workflows in this repository.
 
-The pipeline has three reusable workflows and two composite actions.
+The pipeline has three reusable workflows and four composite actions.
 
 | File | What it does |
 | --- | --- |
 | `.github/workflows/pr.yml` | Checks a pull request: lint, typecheck, tests, `cdk synth`. It has no AWS access. |
-| `.github/workflows/release.yml` | Releases a push to `main`: version tag, one build, then Test, Staging and Production. |
+| `.github/workflows/release.yml` | Releases a push to `main`: version tag, one build, then Test (with the lock and the E2E gate), Staging and Production. |
 | `.github/workflows/redeploy.yml` | Deploys an old release again. This is the rollback path. |
 | `actions/next-version` | Works out the next version from the commit titles. |
 | `actions/deploy` | Deploys one CDK stage from the cloud assembly of the build job. |
+| `actions/lock-acquire` | Takes the lock of the shared Test environment. It waits when another release holds the lock. |
+| `actions/lock-release` | Releases that lock. It never fails the release. |
 
 ## Build once, promote the same artefact
 
@@ -41,11 +43,21 @@ You can also compare the result in AWS. The `CodeSha256` of the Lambda function 
 
 1. `version` works out the next version and creates the tag on the released commit.
 2. `build` runs `npm ci`, lint, typecheck, the tests and one `cdk synth -c version=<version>`. It uploads the zip as a workflow artefact. It also attaches the zip to a GitHub release with the name of the tag.
-3. `deploy-test` deploys the stage `Test` in the GitHub environment `test`.
-4. `deploy-staging` deploys the stage `Staging` in the GitHub environment `staging`.
-5. `deploy-production` deploys the stage `Production` in the GitHub environment `production`.
+3. `lock-test` takes the lock of the Test environment. It waits when another release holds the lock.
+4. `deploy-test` deploys the stage `Test` in the GitHub environment `test`.
+5. `e2e` runs the end-to-end suite of [lab-e2e](https://github.com/jross24/lab-e2e) against Test.
+6. `unlock-test` releases the lock. It runs after a pass, after a failure and after a cancel.
+7. `deploy-staging` deploys the stage `Staging` in the GitHub environment `staging`. It starts only if `e2e` passed.
+8. `deploy-production` deploys the stage `Production` in the GitHub environment `production`.
 
-Each deploy job starts only after the job before it passed.
+`e2e-summary` also runs. It writes the versions that the E2E run tested into the summary of the release.
+
+```
+version -> build -> lock-test -> deploy-test -> e2e -> unlock-test
+                                                  \-> deploy-staging -> deploy-production
+```
+
+Each deploy job starts only after the jobs before it passed.
 If the `production` environment has a required reviewer, `deploy-production` waits until that person approves it.
 
 ### How the version is chosen
@@ -59,6 +71,208 @@ If the `production` environment has a required reviewer, `deploy-production` wai
 
 If the commit already has a version tag, the action gives that version again. So you can run a failed release again.
 The logic is a bash script. Run its tests with `bash actions/next-version/test.sh`.
+
+## The end-to-end gate
+
+After `deploy-test`, the job `e2e` calls the workflow `run.yml` of [lab-e2e](https://github.com/jross24/lab-e2e) for the environment `test`.
+The suite loads the page of web and calls the public APIs. It checks that the versions on the page equal the versions that the services report.
+If the suite fails, `deploy-staging` does not start, so the release stops.
+
+`e2e-summary` writes the exact versions that the suite tested into the summary of the release.
+The summary of the E2E job itself also lists them, with the commit of lab-e2e.
+
+### The input `run-e2e`
+
+The input `run-e2e` of `release.yml` is a boolean. The default is `true`.
+A caller sets it to `false` to skip the suite. Then `deploy-staging` accepts a skipped suite, but only after `deploy-test` passed.
+A failed `deploy-test` also skips the suite, and that still stops the release.
+
+```yaml
+jobs:
+  release:
+    uses: jross24/lab-workflows/.github/workflows/release.yml@main
+    with:
+      run-e2e: false
+    secrets: inherit
+```
+
+`run-e2e: false` does not skip the lock. The release still deploys to Test, so it still must wait for the other releases.
+
+### How the nested call finds its environment, secrets and OIDC identity
+
+A service repository calls `release.yml` of this repository. `release.yml` calls `run.yml` of lab-e2e.
+So `run.yml` is a nested reusable workflow. The rules of the section "Secrets, variables and OIDC in a reusable workflow" apply to each level.
+
+- The job `e2e` is a call, so it cannot set `environment:`. The job `suite` inside `run.yml` sets it. It is the `test` environment of the **service repository**, not of lab-e2e.
+- `secrets.AWS_ACCOUNT_ID` is therefore the secret of the `test` environment of the service repository. `vars.AWS_REGION` is the variable of the service repository.
+- `secrets: inherit` is needed at each level: in the service repository, and in the job `e2e` of this repository. GitHub passes secrets only to the workflow that a job calls directly. The documentation says: "Secrets are only passed to directly called workflow".
+- The OIDC token names the service repository and the environment in its `sub` claim. It does not name lab-e2e. So the trust policy of `github-deploy` needs no change.
+- The permissions can only stay the same or get lower along the chain. The job `e2e` asks for `id-token: write` and `contents: read`. The service repository gives `contents: write` and `id-token: write`, so this works.
+
+These rules come from the GitHub documentation ([Reusing workflows](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows), [OpenID Connect reference](https://docs.github.com/en/actions/reference/security/oidc)).
+The lab has proven the first level (a service repository calls `release.yml`) in a real run, as the section above shows.
+The second level (`release.yml` calls `run.yml`) has not run in the lab yet. See "What is proven and what is not".
+
+## The Test lock
+
+### Why a lock is needed
+
+All service repositories deploy to the same Test environment. Each release deploys to Test and then runs the E2E suite there.
+Imagine that lab-web and lab-svc-catalogue release at the same time.
+lab-web deploys. Then lab-svc-catalogue deploys over it. The suite of lab-web now tests a mix of versions that nobody planned.
+If the suite fails, nobody can tell which change broke it.
+
+So the releases must use Test one at a time. A release holds the lock from before `deploy-test` until after the E2E suite.
+
+### Why a concurrency group does not work
+
+The `concurrency` block in the caller makes the releases of **one repository** wait for each other.
+It cannot protect Test, because Test has four repositories. The GitHub documentation says:
+
+> When a concurrent job or workflow is queued, if another job or workflow using the same concurrency group in the repository is in progress, the queued job or workflow will be `pending`.
+
+Source: [Control the concurrency of workflows and jobs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+The words "in the repository" are the limit. A group in lab-web and a group with the same name in lab-svc-catalogue are two different groups.
+The documentation also says: "If you have multiple workflows in the same repository, concurrency group names must be unique across workflows".
+The lab read the documentation and did not test this with two real repositories.
+
+A lock in a place that all the repositories share solves this. The lab uses a DynamoDB table in the Test account.
+
+### How the lock works
+
+The table `lab-test-lock` has the partition key `lockId`. It has one item, with `lockId = "test-environment"`, while a release holds the lock.
+
+| Attribute | Value |
+| --- | --- |
+| `holder` | `<repository>#<run id>#<run attempt>`, for example `jross24/lab-web#123#1` |
+| `acquiredAt` | The start time, in epoch seconds |
+| `expiresAt` | The end time, in epoch seconds. This is the start time plus 30 minutes. |
+
+**Acquire** (`actions/lock-acquire`) writes the item with a conditional `PutItem`. The condition is:
+
+```
+attribute_not_exists(#id) OR #exp < :now OR begins_with(#holder, :run)
+```
+
+So the write works if the item does not exist, if the lock has expired, or if the same run holds it.
+The code compares `expiresAt` with the clock itself. It does not wait for the TTL of DynamoDB to delete the item, because that deletion is slow. The TTL only cleans up.
+`:run` is the holder without the attempt number (`jross24/lab-web#123#`). A re-run of a run has a new attempt number, and so it takes over the lock of its own earlier attempt.
+
+If another run holds the lock, the action prints who holds it, a link to that run and the time that is left. It waits 15 seconds and tries again.
+After 20 minutes of waiting it fails with a clear message.
+
+**Release** (`actions/lock-release`) deletes the item with the condition `holder = <me>`.
+If the item is gone, or another run holds it, the action prints a warning and succeeds. A cleanup step must not fail a release.
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `table` | `lab-test-lock` | The DynamoDB table. |
+| `lock-id` | `test-environment` | The key of the item. |
+| `timeout-minutes` (acquire) | `30` | The lock ends by itself after this time. |
+| `max-wait-minutes` (acquire) | `20` | The longest wait for another release. |
+| `poll-seconds` (acquire) | `15` | The time between two tries. |
+
+The job that calls an action must log in to AWS first. The role `github-deploy` of the Test account can put, get and delete items in this table.
+The code is the bash script `actions/lock/lock.sh`. Both actions call it. Run its tests with `bash actions/lock/test.sh`.
+
+### What happens when something goes wrong
+
+| Case | What happens |
+| --- | --- |
+| `deploy-test` fails | `e2e` is skipped. `unlock-test` still runs and releases the lock. `deploy-staging` does not start. |
+| The E2E suite fails | `unlock-test` runs and releases the lock. `deploy-staging` does not start. |
+| `lock-test` cannot get the lock in 20 minutes | The job fails. `deploy-test` does not run. `unlock-test` runs, finds that another run holds the lock, and warns. |
+| Someone cancels the run | The expression `always()` "causes the step to always execute, and returns true, even when canceled". `unlock-test` has `if: always()`, so it still runs. The cancel reference says that GitHub ends all jobs that still run 5 minutes after the cancel, so the job must be short. It is short. That page describes jobs that already run. It does not describe a job that still waits for its `needs`. The lab has not tested this case. |
+| A runner dies, or GitHub force-cancels the run | `unlock-test` may not run. The lock ends by itself after 30 minutes. This is the safety valve. |
+| `deploy-test` hangs | The job limit is 15 minutes, less than the 30 minutes of the lock. So the job ends before the lock expires. |
+| The lock expires while a release still uses Test | Another release can take the lock. Both then use Test. The limits of the jobs (15 minutes for `deploy-test`, 12 minutes for the suite) make this unlikely. |
+| A person starts "Re-run failed jobs" after a failed E2E suite | See the limits below. |
+
+Cancel and force-cancel are from the documentation. The lab has not tested them.
+
+### What the lock does not solve
+
+**The set of versions that passed in Test can differ from the set in Staging and Production.**
+The E2E suite tests the versions that are in Test at that time, for example web 0.2.0 with catalogue 0.1.0.
+Each service repository promotes by itself. Staging may hold catalogue 0.1.1 when web 0.2.0 arrives there. Production may hold yet another set.
+So "the suite passed in Test" does not mean "this set of versions works in Staging or in Production".
+The lock only makes the result in Test attributable. It does not pin the set.
+To close this gap, a team must promote a whole set of versions, or use contract tests that check each pair of services on its own.
+
+Other limits:
+
+- **The lock is not a queue.** Waiting releases poll. The release that polls first after the lock ends wins. There is no order and no fairness.
+- **The clock of the runner decides.** The expiry compares the clocks of different runners. GitHub synchronises them, and the margin is 30 minutes, so a few seconds of drift do not matter.
+- **A release that runs again with "Re-run failed jobs" after a failed E2E suite does not take the lock again.** The job `lock-test` passed, so GitHub does not run it again. `unlock-test` released the lock in the first attempt. The second `e2e` run then uses Test without the lock.
+- **A run that lab-e2e starts itself** (a push to its `main`, the nightly schedule or a manual run) does not take the lock. A release that deploys to Test at the same time can disturb it.
+- **The lock covers Test only.** Staging and Production have no lock table.
+
+### The trade-off
+
+A lock makes the releases queue. This has a cost:
+
+- One slow or stuck release delays every team. The wait is up to 20 minutes, and then the next release fails and someone must start it again.
+- The expiry is the safety valve. It frees a lock that a dead run holds. The price is a wait of up to 30 minutes after a crash.
+- Every release now needs the lock table, SSM and the E2E repository. More parts can fail.
+
+The alternative is a Test environment for each team or for each change. That costs more, but it needs no queue.
+
+## What is proven and what is not
+
+| Claim | State |
+| --- | --- |
+| The pure functions of the lock (holder text, expiry, argument checks) | Tested by `actions/lock/test.sh`. CI runs it. |
+| The acquire and release logic: waiting, expiry, take-over, re-run, errors | Tested by `actions/lock/test.sh` against a fake `aws` command and a fake clock. The tests do not call AWS. |
+| The condition expression against the real DynamoDB table | **Not tested.** The tests check the text of the condition, and the fake applies the same rule. |
+| The lock between two real releases | **Not tested.** See the steps below. |
+| `unlock-test` after a failed E2E suite, a failed deploy and a cancel | **Not tested** in Actions. |
+| The nested call `release.yml` -> `run.yml` (environment, secrets, OIDC identity) | **Not tested.** It follows the documentation. |
+| A concurrency group is limited to one repository | From the documentation. Not tested. |
+
+### How to prove it in Actions
+
+Do this after the permission for SSM (lab-platform) is deployed in all three accounts, and after the release queue is free.
+The queue is free when the four waiting releases at `deploy-production` have an answer, and no release is running.
+
+1. Run the E2E workflow alone. It proves the login, the SSM read and the suite.
+
+   ```
+   gh workflow run run.yml --repo jross24/lab-e2e -f environment=test
+   gh run watch --repo jross24/lab-e2e
+   ```
+
+2. Open two small pull requests in two service repositories, for example a change to a README in lab-svc-catalogue and in lab-svc-account. Merge both in the same minute:
+
+   ```
+   gh pr merge <number> --repo jross24/lab-svc-catalogue --squash --delete-branch
+   gh pr merge <number> --repo jross24/lab-svc-account --squash --delete-branch
+   ```
+
+3. Watch the two runs. One `lock-test` job must say `The lock of test-environment is yours`. The other must print `is held by`, a link to the first run and the time that is left, then wait.
+
+   ```
+   gh run list --repo jross24/lab-svc-catalogue --workflow release --limit 1
+   gh run list --repo jross24/lab-svc-account --workflow release --limit 1
+   gh run view <run id> --repo <repository> --log | grep -E "lock|Waiting"
+   ```
+
+4. Read the lock while the first release runs (this is a read-only call):
+
+   ```
+   aws dynamodb get-item --table-name lab-test-lock --key '{"lockId":{"S":"test-environment"}}' --consistent-read --profile lab-test
+   ```
+
+5. The second `deploy-test` must start only after the first `unlock-test` finished. Compare the start and end times of the jobs:
+
+   ```
+   gh run view <run id> --repo <repository> --json jobs --jq '.jobs[] | [.name, .startedAt, .completedAt] | @tsv'
+   ```
+
+6. When both releases are done, `get-item` must return no item.
+
+7. The check of a failed suite: merge a change to lab-e2e that makes one test fail on purpose (for example, a test that expects the version `9.9.9` of web). Then release one service. `e2e` must fail, `unlock-test` must succeed, `deploy-staging` must be skipped, and `get-item` must return no item. Then revert the change in lab-e2e. This stops the gate for all teams while it is in place, so do it when nobody releases.
+
+8. The check of a cancel: start a release, cancel it while `e2e` runs, and check that `unlock-test` ran and `get-item` returns no item. If `unlock-test` did not run, the item must be gone 30 minutes after `acquiredAt`.
 
 ## The redeploy workflow
 
@@ -100,6 +314,8 @@ permissions:
 jobs:
   release:
     uses: jross24/lab-workflows/.github/workflows/release.yml@main
+    # with:
+    #   run-e2e: false   # see "The input run-e2e"
     secrets: inherit
 ```
 
@@ -168,15 +384,21 @@ The first release of `lab-svc-core` (`v0.1.0`) tested these rules.
 
 One rule comes only from the GitHub documentation: the secret is an empty string if the caller does not pass it. The lab did not test a caller with no `secrets: inherit`.
 
+The job `e2e` adds a second level: `release.yml` calls `run.yml` of lab-e2e. The section "The end-to-end gate" explains how the environment, the secrets and the OIDC identity work there.
+
 ## Two releases at the same time
 
 The `concurrency` block in the caller makes a second release wait for the first one.
 `cancel-in-progress: false` means that GitHub never stops a deployment that is in progress.
 
+This block works for the releases of one repository only. The Test lock (above) makes the releases of different repositories wait for each other.
+
 Know these two limits:
 
 - A release that waits for the production reviewer is still in progress. The next release waits behind it until someone approves or rejects it.
-- GitHub keeps only one waiting run in a group. If a third release arrives, GitHub cancels the second one. The third release contains the commits of the second one, so no change is lost.
+- By default, GitHub keeps only one waiting run in a group. If a third release arrives, GitHub cancels the second one. The third release contains the commits of the second one, so no change is lost. The documentation also describes `queue: max`. It lets up to 100 runs wait. The lab does not use it.
+
+The release with the lock waits at `lock-test`, before it deploys. A release that waits for the lock is in progress, so the next release of the same repository waits behind it.
 
 ## Why the references use `@main`
 
@@ -192,5 +414,5 @@ Actions from other owners are different. This repository pins each of them to a 
 
 ## Checks of this repository
 
-The `ci` workflow runs on each pull request. It runs the tests of the next-version script.
+The `ci` workflow runs on each pull request. It runs the tests of the next-version script and the tests of the lock script.
 It also runs `shellcheck` and `actionlint`, but only if the runner image already has them. The repository installs no tool.
