@@ -41,19 +41,31 @@ jobs:
 
   # Fails when the pull request adds or changes a dependency with a known vulnerability of severity high or critical.
   # It compares the dependency graph of the base with the one of the head, so a finding that was already in the
-  # base (for example lab-platform#15) does not fail it. It needs no checkout and no install.
+  # base (for example lab-platform#15) does not fail it. It needs no install.
+  # The list accepted-advisories.json of this repository names the advisories that have no fix yet, each with a date.
+  # The job fetches the list from this repository at tools-ref (the job runs in the caller repository, so the pull request
+  # cannot change the list). The script passes the ids that are not expired to the action. An expired id fails the job again.
   dependencies:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jross24/lab-workflows
+          ref: ${{ inputs.tools-ref }}
+          path: .lab-tools
+          persist-credentials: false
+      - id: accepted
+        run: node .lab-tools/actions/accepted-advisories/cli.mjs allowed .lab-tools/accepted-advisories.json
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
           fail-on-scopes: runtime, development
           license-check: false
           show-patched-versions: true
+          allow-ghsas: ${{ steps.accepted.outputs.allow-ghsas }}
 
   # Fails when a commit of the pull request has a secret. It scans only the commits of the pull request.
   # It never prints the value of a secret.

@@ -1,0 +1,16 @@
+[
+  {
+    "id": "GHSA-6j4f-fj2g-mc7p",
+    "package": "brace-expansion",
+    "reason": "Version 5.0.9 is bundled inside aws-cdk-lib 2.272.0, the newest release, and no patched release exists.",
+    "issue": "jross24/lab-platform#15",
+    "expires": "2026-11-08"
+  },
+  {
+    "id": "GHSA-qhr7-859c-m2p7",
+    "package": "brace-expansion",
+    "reason": "Same bundled copy in aws-cdk-lib 2.272.0, second advisory, and no patched release exists.",
+    "issue": "jross24/lab-platform#15",
+    "expires": "2026-11-08"
+  }
+]
