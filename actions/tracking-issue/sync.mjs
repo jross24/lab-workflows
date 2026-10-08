@@ -35,7 +35,7 @@ export function syncIssue({ gh, repo, name, title, items, renderBody, renderComm
     return { action: 'none', number: issue?.number, newItems: [], dryRun };
   }
   if (fresh.length === 0) {
-    log(`All ${items.length} items are in the open issue #${issue.number}. Nothing to add.`);
+    log(`All ${items.length} ${items.length === 1 ? 'item is' : 'items are'} in the open issue #${issue.number}. Nothing to add.`);
     return { action: 'none', number: issue.number, newItems: [], dryRun };
   }
 
@@ -50,7 +50,7 @@ export function syncIssue({ gh, repo, name, title, items, renderBody, renderComm
   }
   if (issue) {
     gh(['api', '-X', 'POST', `repos/${repo}/issues/${issue.number}/comments`, '--input', '-'], JSON.stringify({ body: text }));
-    log(`Commented on the open issue #${issue.number}: ${fresh.length} new items.`);
+    log(`Commented on the open issue #${issue.number}: ${fresh.length} new ${fresh.length === 1 ? 'item' : 'items'}.`);
     return { action, number: issue.number, newItems: fresh, dryRun };
   }
   const created = JSON.parse(gh(['api', '-X', 'POST', `repos/${repo}/issues`, '--input', '-'], JSON.stringify({ title, body: text })));

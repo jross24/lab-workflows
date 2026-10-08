@@ -128,6 +128,13 @@ describe('rendering', () => {
     assert.equal(body.split('\n').filter((line) => line.startsWith('| lab-')).length, all.length);
   });
 
+  it('uses the singular for one finding', () => {
+    const body = renderBody([all[0]], { minSeverity: 'moderate' });
+    assert.match(body, /found 1 advisory that nobody accepted/);
+    assert.doesNotMatch(body, /1 advisories/);
+    assert.match(renderBody(all, { minSeverity: 'moderate' }), new RegExp(`found ${all.length} advisories that nobody accepted`));
+  });
+
   it('says how to resolve a finding, and names the accepted list', () => {
     const body = renderBody(all, { minSeverity: 'moderate' });
     assert.match(body, /accepted-advisories\.json/);

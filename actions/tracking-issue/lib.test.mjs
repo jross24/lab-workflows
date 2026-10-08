@@ -160,6 +160,19 @@ describe('syncIssue', () => {
     assert.equal(result.action, 'comment');
   });
 
+  it('uses the singular in the log for one item', () => {
+    const fake = createFakeGh();
+    const lines = [];
+    const log = (line) => lines.push(line);
+    syncIssue({ ...base, gh: fake.gh, items: [item('a:1')], log });
+    syncIssue({ ...base, gh: fake.gh, items: [item('a:1')], log });
+    syncIssue({ ...base, gh: fake.gh, items: [item('a:1'), item('b:2')], log });
+    const text = lines.join('\n');
+    assert.match(text, /1 item is in the open issue/);
+    assert.match(text, /1 new item\./);
+    assert.doesNotMatch(text, /1 items|1 new items/);
+  });
+
   it('writes nothing in a dry run, and says what it would do', () => {
     const fake = createFakeGh();
     const lines = [];
