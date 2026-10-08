@@ -54,8 +54,10 @@ while IFS=$'\t' read -r display name template; do
   fi
 
   echo "::group::cdk diff ${display} (${name})"
+  # --exclusively: a stack can depend on another stack of the app. The CLI then selects both, and it refuses to compare
+  # more than one stack with a fixed template.
   # The command exits with 0 when it finds differences. A non-zero exit code means that the command failed.
-  if ! AWS_EC2_METADATA_DISABLED=true npx cdk diff --app cdk.out --template "$old" "$display" --no-color > "diff/${id}.diff.txt" 2>&1; then
+  if ! AWS_EC2_METADATA_DISABLED=true npx cdk diff --app cdk.out --template "$old" "$display" --exclusively --no-color > "diff/${id}.diff.txt" 2>&1; then
     cat "diff/${id}.diff.txt"
     echo "::error::cdk diff failed for ${display}."
     exit 1

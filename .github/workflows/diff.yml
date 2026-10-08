@@ -59,6 +59,9 @@ on:
 # Each job asks for its own permissions.
 permissions: {}
 
+# The artefact names hold the key. A caller can call this workflow more than once in a run (one call for each account),
+# and the name of an artefact must be unique in a run.
+
 # A new push replaces the run of the old commit. Two runs could write the comment at the same time.
 concurrency:
   group: cdk-diff-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ inputs.key }}
@@ -144,7 +147,7 @@ jobs:
           rm -f describe.json describe.err
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: deployed
+          name: deployed-${{ inputs.key }}
           path: deployed
           retention-days: 1
           if-no-files-found: error
@@ -174,7 +177,7 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: deployed
+          name: deployed-${{ inputs.key }}
           path: deployed
       - name: synthesise and compare
         env:
@@ -185,7 +188,7 @@ jobs:
         run: bash .lab-tools/actions/cdk-diff/compute.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: diff
+          name: diff-${{ inputs.key }}
           path: diff
           retention-days: 1
           if-no-files-found: error
@@ -206,7 +209,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: diff
+          name: diff-${{ inputs.key }}
           path: diff
       - name: post the comment
         env:
