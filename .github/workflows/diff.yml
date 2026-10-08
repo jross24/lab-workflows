@@ -134,7 +134,9 @@ jobs:
               text = text.replace(/(?<![0-9A-Za-z])[0-9]{12}(?![0-9A-Za-z])/g, "[account-id]");
               fs.writeFileSync(file, text);
             ' "deployed/${name}.json" "$ACCOUNT_ID"
-            version="$(jq -r '[.Stacks[0].Outputs[]? | select(.OutputKey == "Version") | .OutputValue][0] // empty' describe.json)"
+            # The version comes from the template that the diff uses, and not from the stack outputs.
+            # While a deployment runs, the template can be newer than the outputs.
+            version="$(jq -r '.Outputs.Version.Value // empty | select(type == "string")' "deployed/${name}.json")"
             meta="$(jq -c --arg name "$name" --arg version "$version" \
               '. + [{name: $name, deployed: true, version: (if ($version | length) > 0 then $version else null end)}]' <<< "$meta")"
           done
