@@ -6,7 +6,8 @@
 #
 # Usage: lock.sh acquire | release
 # Settings come from environment variables. The actions set them from their inputs:
-#   LOCK_TABLE, LOCK_ID, LOCK_TIMEOUT_MINUTES, LOCK_MAX_WAIT_MINUTES, LOCK_POLL_SECONDS
+#   LOCK_TABLE, LOCK_ID, LOCK_TIMEOUT_MINUTES, LOCK_MAX_WAIT_MINUTES, LOCK_POLL_SECONDS,
+#   LOCK_ON_TIMEOUT (fail or skip), LOCK_FAIL_HINT (text that the error message adds)
 # GitHub sets the run variables: GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT.
 set -euo pipefail
 
@@ -227,18 +228,24 @@ try_delete() {
 
 # Waits until the lock is free, then takes it. Fails when the wait is over.
 acquire() {
-  local table lock_id timeout_minutes max_wait_minutes poll_seconds holder
+  local table lock_id timeout_minutes max_wait_minutes poll_seconds holder on_timeout fail_hint
   table="${LOCK_TABLE:-$DEFAULT_TABLE}"
   lock_id="${LOCK_ID:-$DEFAULT_LOCK_ID}"
   timeout_minutes="${LOCK_TIMEOUT_MINUTES:-$DEFAULT_TIMEOUT_MINUTES}"
   max_wait_minutes="${LOCK_MAX_WAIT_MINUTES:-20}"
   poll_seconds="${LOCK_POLL_SECONDS:-15}"
+  on_timeout="${LOCK_ON_TIMEOUT:-fail}"
+  fail_hint="${LOCK_FAIL_HINT:-}"
 
   validate_name 'LOCK_TABLE' "$table" || return 1
   validate_name 'LOCK_ID' "$lock_id" || return 1
   require_int 'LOCK_TIMEOUT_MINUTES' "$timeout_minutes" 1 || return 1
   require_int 'LOCK_MAX_WAIT_MINUTES' "$max_wait_minutes" 0 || return 1
   require_int 'LOCK_POLL_SECONDS' "$poll_seconds" 1 || return 1
+  if [[ "$on_timeout" != fail && "$on_timeout" != skip ]]; then
+    echo "lock: LOCK_ON_TIMEOUT must be fail or skip, but it is \"$on_timeout\"" >&2
+    return 1
+  fi
   holder="$(holder_id "${GITHUB_REPOSITORY:-}" "${GITHUB_RUN_ID:-}" "${GITHUB_RUN_ATTEMPT:-}")" || return 1
 
   # The values are checked. Make them plain decimal numbers, so 08 is 8 in all the arithmetic below.
@@ -258,16 +265,23 @@ acquire() {
     previous="$(try_put "$table" "$lock_id" "$holder" "$now" "$expires")" || status=$?
 
     if [[ "$status" -eq 0 ]]; then
+      # fresh is false when this very run held the lock already. Then the call only starts the expiry again.
+      local fresh=true
       if [[ -z "$previous" ]]; then
         echo "::notice::The lock of $lock_id is yours ($holder)."
       elif [[ "$previous" == "$holder" ]]; then
+        fresh=false
         echo "::notice::This run already had the lock of $lock_id ($holder). The expiry starts again."
       else
         echo "::notice::The lock of $lock_id is yours ($holder). It took over from $previous, which had finished or had expired."
       fi
       echo "The lock ends at $(format_time "$expires") ($timeout_minutes min from now). A release that takes longer loses it."
       if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-        echo "holder=${holder}" >> "$GITHUB_OUTPUT"
+        {
+          echo "holder=${holder}"
+          echo "acquired=true"
+          echo "fresh=${fresh}"
+        } >> "$GITHUB_OUTPUT"
       fi
       return 0
     fi
@@ -281,7 +295,18 @@ acquire() {
 
     remaining=$((deadline - now))
     if ((remaining <= 0)); then
-      echo "::error::The Test environment stayed locked for $max_wait_minutes min. Run this release again when the other release has finished."
+      if [[ "$on_timeout" == skip ]]; then
+        echo "::notice::The lock of $lock_id stayed taken for $max_wait_minutes min. This run does not use the environment."
+        if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+          echo "acquired=false" >> "$GITHUB_OUTPUT"
+        fi
+        return 0
+      fi
+      if ((max_wait_minutes == 0)); then
+        echo "::error::The Test environment is locked, and this step does not wait.${fail_hint:+ $fail_hint}"
+      else
+        echo "::error::The Test environment stayed locked for $max_wait_minutes min. Run this release again when the other release has finished.${fail_hint:+ $fail_hint}"
+      fi
       return 1
     fi
     echo "Waiting for the lock. $(format_duration "$remaining") of the wait are left."
@@ -325,7 +350,7 @@ release() {
     "$HELD")
       item="$(get_lock "$table" "$lock_id")" || item=''
       if [[ -z "$item" ]]; then
-        echo "::warning::The lock of $lock_id is already gone. It probably expired. Nothing to release."
+        echo "::warning::The lock of $lock_id is already gone. Another job of this run released it, or it expired. Nothing to release."
       else
         echo "::warning::The lock of $lock_id belongs to $(cut -f 1 <<< "$item"), not to $holder. This run does not release it."
       fi

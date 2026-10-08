@@ -241,7 +241,7 @@ check 'a free lock is taken at once' '0' "$status"
 check 'the holder is stored' 'jross24/lab-web#123#1' "$(stored_holder)"
 check 'the expiry is 30 minutes from now' '1001800' "$(stored_expires)"
 check 'one write and no wait' '1 0' "$(calls_of put-item) $PAUSED"
-check 'the holder is an output of the action' 'holder=jross24/lab-web#123#1' "$(cat "$GITHUB_OUTPUT")"
+check 'the outputs of the action: holder, acquired and fresh' 'holder=jross24/lab-web#123#1 acquired=true fresh=true' "$(tr '\n' ' ' < "$GITHUB_OUTPUT" | sed 's/ $//')"
 contains 'the log says that the lock is yours' 'is yours (jross24/lab-web#123#1)' "$output"
 contains 'the log says when the lock ends' 'The lock ends at' "$output"
 contains 'the call used the condition without the TTL' "put-item $ACQUIRE_CONDITION" "$(cat "$state/calls")"
@@ -288,6 +288,36 @@ reset
 set_lock 'jross24/lab-svc-core#77#1' 1000000 9999999
 LOCK_MAX_WAIT_MINUTES=0 run_command acquire
 check 'a wait of 0 minutes fails at once when the lock is held' '1 0' "$status $PAUSED"
+contains 'a step that does not wait says so' '::error::The Test environment is locked, and this step does not wait.' "$output"
+
+reset
+set_lock 'jross24/lab-svc-core#77#1' 1000000 9999999
+LOCK_MAX_WAIT_MINUTES=0 LOCK_FAIL_HINT='Run all jobs again.' run_command acquire
+contains 'the hint is added to the error of a step that does not wait' 'does not wait. Run all jobs again.' "$output"
+
+reset
+set_lock 'jross24/lab-svc-core#77#1' 1000000 9999999
+LOCK_MAX_WAIT_MINUTES=1 LOCK_FAIL_HINT='Run all jobs again.' run_command acquire
+contains 'the hint is added to the error after a wait' 'has finished. Run all jobs again.' "$output"
+
+reset
+set_lock 'jross24/lab-svc-core#77#1' 1000000 9999999
+LOCK_MAX_WAIT_MINUTES=1 LOCK_ON_TIMEOUT=skip run_command acquire
+check 'on-timeout skip does not fail after the wait' '0 60' "$status $PAUSED"
+check 'on-timeout skip leaves the lock to the other holder' 'jross24/lab-svc-core#77#1' "$(stored_holder)"
+check 'on-timeout skip sets acquired to false and no holder' 'acquired=false' "$(cat "$GITHUB_OUTPUT")"
+contains 'on-timeout skip gives a notice' '::notice::The lock of test-environment stayed taken for 1 min' "$output"
+check 'on-timeout skip gives no error line' '0' "$(grep -c '::error::' <<< "$output" || true)"
+
+reset
+set_lock 'jross24/lab-svc-core#77#1' 1000000 9999999
+LOCK_MAX_WAIT_MINUTES=0 LOCK_ON_TIMEOUT=skip run_command acquire
+check 'on-timeout skip with no wait gives up at once' '0 0 acquired=false' "$status $PAUSED $(cat "$GITHUB_OUTPUT")"
+
+reset
+LOCK_ON_TIMEOUT=skip run_command acquire
+check 'on-timeout skip still takes a free lock' '0 jross24/lab-web#123#1' "$status $(stored_holder)"
+check 'on-timeout skip with a free lock is acquired' 'acquired=true' "$(grep acquired "$GITHUB_OUTPUT")"
 
 reset
 set_lock 'jross24/lab-svc-core#77#1' 1000000 9999999
@@ -303,6 +333,11 @@ check 'the same holder gets the lock again' '0 jross24/lab-web#123#1' "$status $
 check 'the expiry starts again' '1001800' "$(stored_expires)"
 check 'it did not wait' '0' "$PAUSED"
 contains 'the log says that the run already had the lock' 'already had the lock' "$output"
+check 'a lock that the run already had is not fresh' 'fresh=false' "$(grep fresh "$GITHUB_OUTPUT")"
+
+reset
+LOCK_MAX_WAIT_MINUTES=0 run_command acquire
+check 'a free lock is fresh' 'fresh=true' "$(grep fresh "$GITHUB_OUTPUT")"
 
 reset
 GITHUB_RUN_ATTEMPT=2
@@ -310,6 +345,7 @@ set_lock 'jross24/lab-web#123#1' 999000 9999999
 run_command acquire
 check 'a re-run takes the lock of its own earlier attempt' '0 jross24/lab-web#123#2' "$status $(stored_holder)"
 contains 'the log names the earlier attempt' 'took over from jross24/lab-web#123#1' "$output"
+check 'the lock of an earlier attempt counts as fresh, so the new attempt must release it' 'fresh=true' "$(grep fresh "$GITHUB_OUTPUT")"
 
 reset
 set_lock 'jross24/lab-web#1234#1' 1000000 9999999
@@ -350,6 +386,7 @@ reset
 run_command release
 check 'a lock that is gone is not an error' '0' "$status"
 contains 'the log warns that the lock is gone' '::warning::The lock of test-environment is already gone' "$output"
+contains 'the warning does not claim that the lock expired' 'or it expired' "$output"
 
 reset
 set_lock 'jross24/lab-svc-core#77#1' 1000000 1001800
@@ -378,6 +415,7 @@ run_script() {
   output="$(env GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-}" GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
     LOCK_TIMEOUT_MINUTES="${LOCK_TIMEOUT_MINUTES:-}" LOCK_MAX_WAIT_MINUTES="${LOCK_MAX_WAIT_MINUTES:-}" \
     LOCK_POLL_SECONDS="${LOCK_POLL_SECONDS:-}" LOCK_ID="${LOCK_ID:-}" LOCK_TABLE="${LOCK_TABLE:-}" \
+    LOCK_ON_TIMEOUT="${LOCK_ON_TIMEOUT:-}" LOCK_FAIL_HINT="${LOCK_FAIL_HINT:-}" \
     bash "$here/lock.sh" "$@" 2>&1)" || status=$?
 }
 
@@ -412,6 +450,12 @@ check 'a timeout of 0 fails' '1' "$status"
 reset
 LOCK_POLL_SECONDS=0 run_script acquire
 check 'a poll of 0 seconds fails' '1' "$status"
+
+reset
+LOCK_ON_TIMEOUT=ignore run_script acquire
+check 'an on-timeout value that is not fail or skip fails' '1' "$status"
+contains 'the message names LOCK_ON_TIMEOUT' 'LOCK_ON_TIMEOUT' "$output"
+check 'a bad on-timeout value makes no AWS call' '0' "$(wc -l < "$state/calls" | tr -d ' ')"
 
 reset
 LOCK_ID='a"b' run_script acquire
