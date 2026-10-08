@@ -194,6 +194,19 @@ If the item is gone, or another run holds it, the action prints a warning and su
 | `timeout-minutes` (acquire) | `40` | The lock ends by itself after this time. |
 | `max-wait-minutes` (acquire) | `20` | The longest wait for another release. |
 | `poll-seconds` (acquire) | `15` | The time between two tries. |
+| `on-timeout` (acquire) | `fail` | What the action does when the wait is over. `fail` fails the step. `skip` prints a notice, sets `acquired` to `false` and succeeds. |
+| `fail-hint` (acquire) | empty | A sentence that the error message adds. It tells the reader what to do. |
+
+`lock-acquire` has three outputs.
+
+| Output | Meaning |
+| --- | --- |
+| `holder` | The holder text that this run wrote. Empty if the action did not take the lock. |
+| `acquired` | `true` if this run holds the lock. `false` if `on-timeout` is `skip` and the lock stayed with another run. |
+| `fresh` | `false` if this run held the lock before the call. The call then only starts the expiry again. `true` if the lock was free, had expired, or came from an earlier attempt of this run. |
+
+A wait of 0 minutes (`max-wait-minutes: 0`) makes one try and does not wait.
+A job uses it to check that its run holds the lock, without a long wait.
 
 #### The time budget of the lock
 

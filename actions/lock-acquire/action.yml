@@ -1,8 +1,9 @@
 name: lock acquire
-description: Takes the lock of the shared Test environment. Waits when another release holds it. Fails when the wait is over.
+description: Takes the lock of the shared Test environment. Waits when another run holds it. Fails, or skips, when the wait is over.
 
 # The job must log in to AWS first, with a role that can put and get items in the lock table.
 # The holder is "<repository>#<run id>#<run attempt>". The README explains the lock.
+# A run that already holds the lock takes it again. The call only starts the expiry again, and "fresh" is false.
 inputs:
   table:
     description: The name of the DynamoDB table.
@@ -11,19 +12,31 @@ inputs:
     description: The value of the key lockId. It names the environment that the lock protects.
     default: test-environment
   timeout-minutes:
-    description: The time after which the lock ends by itself, if nobody releases it. This is the safety valve. The default of 40 minutes is longer than the longest release (24 minutes). The README has the numbers.
+    description: The time after which the lock ends by itself, if nobody releases it. This is the safety valve. The default of 40 minutes is longer than the longest release (29 minutes). The README has the numbers.
     default: '40'
   max-wait-minutes:
-    description: The longest time to wait for another release. Then the action fails.
+    description: The longest time to wait for another run. Then the action fails, or skips (see on-timeout). 0 means do not wait.
     default: '20'
   poll-seconds:
     description: The time between two tries.
     default: '15'
+  on-timeout:
+    description: What the action does when the wait is over. "fail" fails the step. "skip" prints a notice, sets acquired to false and succeeds.
+    default: fail
+  fail-hint:
+    description: A sentence that the error message adds when the action fails. Use it to tell the reader what to do.
+    default: ''
 
 outputs:
   holder:
-    description: The holder text that this run wrote into the lock.
+    description: The holder text that this run wrote into the lock. Empty when the action did not take the lock.
     value: ${{ steps.acquire.outputs.holder }}
+  acquired:
+    description: The text true if this run holds the lock now. The text false if on-timeout is skip and the lock stayed with another run.
+    value: ${{ steps.acquire.outputs.acquired }}
+  fresh:
+    description: The text false if this run held the lock before this call (the call only started the expiry again). The text true if the lock was free, had expired, or came from an earlier attempt of this run.
+    value: ${{ steps.acquire.outputs.fresh }}
 
 runs:
   using: composite
@@ -36,4 +49,6 @@ runs:
         LOCK_TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
         LOCK_MAX_WAIT_MINUTES: ${{ inputs.max-wait-minutes }}
         LOCK_POLL_SECONDS: ${{ inputs.poll-seconds }}
+        LOCK_ON_TIMEOUT: ${{ inputs.on-timeout }}
+        LOCK_FAIL_HINT: ${{ inputs.fail-hint }}
       run: bash "$GITHUB_ACTION_PATH/../lock/lock.sh" acquire
