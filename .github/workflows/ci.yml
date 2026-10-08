@@ -38,6 +38,8 @@ jobs:
         run: bash actions/propose-rollback/test.sh
       - name: test the record-production script
         run: bash actions/record-production/test.sh
+      - name: test the reuse-artefact script
+        run: bash actions/reuse-artefact/test.sh
       - name: test the install-tool script
         run: bash actions/install-tool/test.sh
       - name: test the changed-paths script
