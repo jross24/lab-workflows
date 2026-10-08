@@ -12,10 +12,10 @@ The pipeline has reusable workflows and several composite actions.
 | `.github/workflows/redeploy.yml` | Deploys an old release again. This is the rollback path. It takes the Test lock for Test. |
 | `.github/workflows/check.yml` | A dry run of the checks before a deployment. It deploys nothing. |
 | `actions/pipeline-info` | Reads `pipeline.json` of the service repository and gives the name of the service. |
-| `actions/preflight` | The checks before a deployment: the providers, the tested set and "no step back". The script and its tests are in the same folder. |
+| `actions/preflight` | The checks before a deployment: the providers, the tested set, "no step back" and the rollback floor. The script and its tests are in the same folder. |
 | `actions/tested-with` | Makes the record of the versions that passed in Test (`tested-with.json`). |
 | `actions/supersede` | Cancels the older releases that wait for the production reviewer. |
-| `actions/propose-rollback` | After a failed smoke check in Production, it starts the redeploy of the earlier version. That run waits for the reviewer. |
+| `actions/propose-rollback` | After a failed smoke check in Production, it starts the redeploy of the earlier version. That run waits for the reviewer. It does not start the redeploy if the earlier version is below the rollback floor. |
 | `actions/next-version` | Works out the next version from the commit titles. |
 | `actions/deploy` | Deploys one CDK stage from the cloud assembly of the build job. |
 | `actions/lock-acquire` | Takes the lock of the shared Test environment. It waits when another release holds the lock. |
@@ -389,8 +389,59 @@ A redeploy follows the same rules as a release in these places:
 - **The concurrency group.** The job `redeploy` uses the group `deploy-<environment>`, the same group as the release jobs `deploy-staging` and `deploy-production`. A redeploy and a release of one repository never deploy to one environment at the same time. To roll back while a release waits for the reviewer in Production, reject or cancel the waiting release first.
 - **The checks before the deployment**, in the mode `redeploy`. A provider that is missing or too old still stops the redeploy, because the stack would fail. The check "no step back" does not stop it, because going back is the aim. The tested set does not stop it either. A rollback must not wait for a neighbour. The table of the summary shows an older neighbour as a warning.
   The record of the tested set comes from `tested-with.json` of the GitHub release. A release from before the record has none, and the check says so.
+- **The rollback floor.** A redeploy stops when its version is older than the rollback floor of the environment. The check reads the SSM parameter `/lab/<service>/min-rollback-version` and fails with `Rollback refused`. It runs before the deployment, and for Test after the lock, so a refused redeploy changes nothing. A service with no such parameter has no floor. See "The rollback floor" and "Rollback and data".
 - **`pipeline.json`.** A tag from before the checks has no such file. Then the redeploy reads the file of the default branch and says so in a notice.
 - **The smoke check.** A redeploy to Staging or Production runs the smoke subset after the deployment, for the version that it deployed. A redeploy to Test does not, because Test has the full suite in the release.
+
+## Rollback and data
+
+A rollback restores code, not data. So the lab has three rules:
+
+1. A change to a data shape takes two releases. This section explains the rule.
+2. The pipeline blocks a destructive change to a data store unless a person acknowledges it. See "The stateful change guard".
+3. The rollback path refuses a version that cannot read the current data. See "The rollback floor".
+
+In the lab only `core` has data, so only `core` has a rollback floor.
+
+### A rollback restores code, not data
+
+A rollback puts the old code back. It does not put the old data back.
+The data keeps every change that the new code and its migrations made. So a rollback is safe only when the old code can read the data as it is now.
+
+### One change to a data shape takes two releases
+
+The two releases are "expand" and "contract". The first release adds, and the second release removes.
+
+1. **Expand.** Release 1 adds the new shape next to the old shape. The new code writes both shapes and reads either one. Nothing is removed, so the previous version still reads all the data and a rollback is safe.
+2. **Contract.** Release 2 comes later, when Production runs release 1 and the data has the new shape. Release 2 reads only the new shape and removes the old shape.
+
+For example, take a rename of the attribute `name` to `title`. Release 1 writes both attributes, and it reads `title`, or `name` when `title` is missing. Release 2 reads only `title`, and it deletes `name`.
+One release must not do both steps. If it did, the previous version would meet data that it cannot read at the moment of a rollback.
+After release 2 the floor is release 1. Release 0 reads only `name`, which is gone, so a redeploy of release 0 is refused.
+
+### Why a contract release is safe against the automatic rollback of the canary
+
+A release to Production moves the traffic in steps with CodeDeploy (a canary). When an alarm fires, CodeDeploy moves the alias back to the previous Lambda version by itself.
+This rollback does not use `redeploy.yml`. So the check of the rollback floor does not see it, and two other rules must make it safe:
+
+- **The contract release must itself read the data that the previous version wrote.** During the canary both versions run on the same data. The previous version is an expand release, so it also reads what the contract release writes.
+- **Destructive steps run only after the canary has finished.** CloudFormation waits for the CodeDeploy deployment of the alias before it updates the next resource. A destructive resource depends on the alias, so it starts only when the canary has passed. If the canary rolls back, the destructive step never runs and the data keeps its old shape.
+
+The rollback floor guards the other path: a redeploy that a person starts, or that `propose-rollback` starts.
+
+### The order of the migration steps
+
+Additive (expand) migrations run before the new code takes traffic: the stack resource `MigrationsExpand` runs before the alias is updated.
+Destructive (contract) migrations run after the canary has finished: the resource `MigrationsContract` depends on the alias, so CloudFormation waits for the CodeDeploy deployment first.
+A destructive migration records the new rollback floor before its first write, and the floor never goes down.
+
+The stack of the service must implement this order. This repository only checks the result: it reads the floor and refuses a rollback below it.
+
+### Where the rollback floor lives
+
+The rollback floor lives with the data: the SSM parameter `/lab/<service>/min-rollback-version` in the account of each environment.
+A redeploy applies the old stack again, so the old stack cannot hold the floor: it was built before the migration that raised it.
+So the migration step of the service writes the floor, and it never lowers it.
 
 ## Use the pipeline in a service repository
 
@@ -762,6 +813,16 @@ Each service repository has the file `pipeline.json` at its root. It tells the p
 | `service` | Required. The name of the service: lower case letters, digits and hyphens. It is the same name as in the SSM parameter `/lab/<service>/version`. |
 | `requires` | The providers of the service. Each key is a service. Each value is a range. The service cannot be deployed to an environment that has a provider outside its range. |
 | `compatible` | Optional. Neighbours that may be older in an environment than in the tested set, as long as they are inside the range. The service does not call them. It only says that it works with the older version. For a neighbour that has a `compatible` range and a `requires` range, the `compatible` range counts. Only the lower side matters: a newer neighbour always goes on, with a notice. |
+| `minRollbackVersion` | Optional. A version such as `0.8.0`, as text. Only a service with data sets it. It declares the oldest version that can run against the data after this release. A release fails with `Floor above release` if the key is newer than the release itself. The floor that decides a redeploy is the SSM parameter `/lab/<service>/min-rollback-version`, not this key. See "The rollback floor". |
+
+A service with data declares its rollback floor like this:
+
+```json
+{
+  "service": "core",
+  "minRollbackVersion": "0.8.0"
+}
+```
 
 A range is one or more comparators with a space between them. All of them must hold. The operators are `>=`, `>`, `<=`, `<` and `=`. A version with no operator means `=`.
 Examples: `>=0.5.0`, `>=0.5.0 <1.0.0`, `1.2.3`. A caret range such as `^0.5.0` is not supported. A wrong range stops the release with a message that names the file.
@@ -787,7 +848,7 @@ The role `github-deploy` can read these parameters (`ssm:GetParameters` on `/lab
 
 ## The checks before a deployment
 
-Before a deploy job changes an environment, the action `actions/preflight` reads `/lab/<service>/version` of the services that matter, in the account of that environment. It compares them in three ways. Each deploy job runs the checks right before `cdk deploy`. In `deploy-test`, the step that makes sure the run holds the lock comes first.
+Before a deploy job changes an environment, the action `actions/preflight` reads `/lab/<service>/version` of the services that matter, in the account of that environment. It compares them in four ways. Each deploy job runs the checks right before `cdk deploy`. In `deploy-test`, the step that makes sure the run holds the lock comes first.
 The result is a table in the job summary and a clear message for each failure. A failure stops the job before `cdk deploy` changes anything.
 
 | Check | Question | Fails when |
@@ -795,6 +856,7 @@ The result is a table in the job summary and a clear message for each failure. A
 | No step back | Is this release newer than what the environment runs? | The environment runs a newer version of this service. |
 | Providers (issue 16) | Does the environment have each provider of `requires`, inside its range? | A provider has no version in the environment, or its version is outside the range. |
 | Tested set (issue 21) | Does the environment have, for each neighbour, at least the version that the E2E suite tested? | A neighbour is older than the tested version and no range accepts it. |
+| Rollback floor (issue 33) | Is the version that a redeploy puts into the environment at least the rollback floor? | A redeploy goes to a version below the floor. A release fails here only if `minRollbackVersion` of `pipeline.json` is newer than the release. |
 
 The checks run after the approval of the production reviewer, right before the deployment. They read the state at that time. A reviewer can approve hours after the release started, and the state can change in that time.
 A check cannot run before the approval, because the job needs the AWS role of the environment, and the role needs the approval.
@@ -842,6 +904,56 @@ The failure message looks like this:
 ```
 
 When the missing release reaches the environment, run the failed job again. The check reads the state again and passes.
+
+### The rollback floor
+
+A rollback restores code, not data. A migration can change the data so that an older version of the code cannot read it. The rollback floor is the oldest version of a service that can still run against the data in an environment.
+
+The section "Rollback and data" explains the reason in more detail.
+
+**Where it is written.** The SSM parameter `/lab/<service>/min-rollback-version` holds the floor, in the account of each environment. The value is a version such as `0.8.0`. Only a service with data has the parameter. In the lab this is `core`.
+
+**Who writes it.** The migration step of the service stack writes the parameter during the deployment. It writes the new floor before the first destructive write, and it never lowers the floor. The role `github-deploy` only reads the parameter (`ssm:GetParameter` and `ssm:GetParameters` on `/lab/*`).
+
+**What the check does.** A redeploy with a version reads the parameter. It compares the value with the version that the redeploy would deploy:
+
+| The parameter in the environment | Result |
+| --- | --- |
+| It does not exist | Goes on. The table says `ok: no floor recorded`. A service with no data has no floor. |
+| The floor is the version or older | Goes on. |
+| The floor is newer than the version | The job fails with `Rollback refused`. The deployment does not start. |
+| The value is not a version | The check stops with an error that says "This is not a result of the check". It makes no guess. |
+| AWS gives another error (no login, no permission) | The same. Only the error `ParameterNotFound` means "no floor". |
+
+The refusal looks like this:
+
+```
+::error title=Rollback refused::Rollback refused: core 0.7.0 cannot run against the data in production. A migration changed the data in a way that an older version cannot read. The oldest version that can run is core 0.8.0 (SSM parameter /lab/core/min-rollback-version). Do not roll back to 0.7.0. Go back to 0.8.0 or newer, or fix forward with a new release. If the data itself is wrong, restore it first: see "Restore" in the README of lab-svc-core.
+```
+
+Two more places use the floor:
+
+- **A release.** The key `minRollbackVersion` of `pipeline.json` cannot be newer than the release that declares it. If it is, the job fails with `Floor above release`. A release does not read the SSM parameter.
+- **A failed smoke check in Production.** `propose-rollback` reads the parameter before it starts the redeploy. If the earlier version is below the floor, it does not start the redeploy. See "A failed smoke check in Production".
+
+A dry run (`check.yml`) has no version, so it does not compare the floor.
+The action `preflight` gives the value that it read in the output `min-rollback-version`. The output is empty for a release and for a dry run.
+
+**What the person does next.** The message gives three ways. Pick one:
+
+1. Go back to the floor or to a newer version. The redeploy of that version is not refused.
+2. Fix forward. Fix the fault in the code and make a new release.
+3. If the data itself is wrong, restore the data first. The README of the service repository describes the restore in the section "Restore". Then decide again.
+
+**What the floor does not do.**
+
+- It does not restore data. It only refuses a rollback that cannot work.
+- It does not check that the data is readable. It compares version numbers. It trusts the migration step to write the floor, and to write it before the first destructive write.
+- A service with no parameter has no protection. If the migration step forgets to write the floor, the check sees "no floor" and lets the redeploy go.
+- It does not stop the automatic rollback of the canary. CodeDeploy does that without `redeploy.yml`. The order of the migration steps makes it safe (see "Rollback and data").
+- It does not stop a person who changes the stack outside the pipeline.
+
+The lab tested the comparison, the messages and the decision of `propose-rollback` with unit tests and a fake `aws` command. A real run against SSM is not part of the proof yet.
 
 ### A dry run: `check.yml`
 
@@ -922,7 +1034,7 @@ The canary and its alarms watch the first minutes of the release. The smoke chec
 The job `deploy-production` then fails, so the run is red. This is the loud part. The last step, `propose-rollback`, does three things:
 
 1. It writes an error annotation and a summary with the way back, including the exact command.
-2. If Production ran an earlier version of the service, it starts the workflow `redeploy.yml` of the service repository for that version. That run waits for the production reviewer, like every deployment to Production.
+2. If Production ran an earlier version of the service, it starts the workflow `redeploy.yml` of the service repository for that version. It does not start the workflow when that version is below the rollback floor. The run waits for the production reviewer, like every deployment to Production.
 3. It never changes Production by itself.
 
 The lab chose this over an automatic rollback for these reasons:
@@ -933,6 +1045,14 @@ The lab chose this over an automatic rollback for these reasons:
 - The redeploy run holds the concurrency group `deploy-production`. So no newer release deploys to Production before the person has decided.
 
 If Production had no earlier version, or the earlier version is the same, there is nothing to go back to. The summary says so, and the way forward is a new release.
+
+Before the step starts the redeploy, it reads the rollback floor from `/lab/<service>/min-rollback-version`. The deploy job still has the AWS login of the deployment. The new release may have raised the floor.
+
+If the earlier version is below the floor, the step does not start the redeploy. It writes a warning with the text of the refusal. The summary says to fix forward.
+
+If the step cannot read the floor, it goes on as before and writes a notice. This happens when the parameter is missing, when access fails, or when the value is not a version. The step still never fails.
+
+The redeploy workflow reads the floor again. So it refuses a version below the floor, also when a person starts it by hand.
 Rollback by `redeploy.yml` works for releases that have a stored assembly. The README of each service says which old versions cannot be redeployed.
 
 ## The fault drill

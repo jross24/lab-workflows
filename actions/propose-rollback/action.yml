@@ -1,7 +1,9 @@
 name: propose rollback
-description: Runs after a failed smoke check in Production. It starts the redeploy of the earlier version. That run waits for the production reviewer. It never fails.
+description: Runs after a failed smoke check in Production. It starts the redeploy of the earlier version, unless that version is below the rollback floor. That run waits for the production reviewer. It never fails.
 
 # The job needs the permission actions: write, and the caller of the release must give it.
+# The job also needs the AWS login of the deployment, to read the rollback floor (ssm:GetParameter on /lab/*).
+# Without the login, the step cannot read the floor. It then goes on as before and writes a notice.
 # The redeploy workflow of the service repository must be the file redeploy.yml. The README explains the choice.
 inputs:
   service:

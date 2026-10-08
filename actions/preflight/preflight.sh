@@ -16,6 +16,10 @@
 #                PF_REQUIRES_OVERRIDE (a JSON object that replaces "requires", for a dry run)
 # GitHub sets GITHUB_OUTPUT and GITHUB_STEP_SUMMARY.
 #
+# The rollback floor is the oldest version of a service that can still read the data in an environment.
+# The SSM parameter /lab/<service>/min-rollback-version holds it. The check in the mode redeploy refuses a version below it.
+# The key minRollbackVersion of pipeline.json declares it. The check in the mode release only compares that key with the release.
+#
 # The script uses no associative arrays, so it also runs with the bash 3.2 of macOS.
 set -euo pipefail
 
@@ -138,6 +142,32 @@ self_verdict() {
   esac
 }
 
+# floor_verdict <version> <floor>
+# Compares a version with the rollback floor of an environment. The floor may be empty.
+# A version, and a floor that is not empty, must both be valid. Prints one word:
+#   none   no floor is recorded: there is nothing to compare
+#   ok     the version is the floor or newer
+#   below  the version is older than the floor: the data may be unreadable for it
+floor_verdict() {
+  local version="$1" floor="${2:-}"
+  if [[ -z "$floor" ]]; then
+    echo none
+    return 0
+  fi
+  case "$(compare_versions "$version" "$floor")" in
+    -1) echo below ;;
+    *) echo ok ;;
+  esac
+}
+
+# rollback_refusal <service> <version> <environment> <floor>
+# The text that says why a rollback is refused. preflight.sh and propose-rollback.sh print it.
+# Keep the words as they are: the README and the tests quote them.
+rollback_refusal() {
+  local service="$1" version="$2" environment="$3" floor="$4"
+  printf '%s' "Rollback refused: $service $version cannot run against the data in $environment. A migration changed the data in a way that an older version cannot read. The oldest version that can run is $service $floor (SSM parameter /lab/$service/min-rollback-version). Do not roll back to $version. Go back to $floor or newer, or fix forward with a new release. If the data itself is wrong, restore it first: see \"Restore\" in the README of $(repository_of "$service")."
+}
+
 # provider_verdict <deployed> <range>   Prints missing, outside or ok. "outside" means too old, or too new for an upper bound.
 provider_verdict() {
   local deployed="$1" range="$2"
@@ -186,12 +216,16 @@ neighbour_verdict() {
 #   PIPELINE_SERVICE     the name of the service
 #   PIPELINE_REQUIRES    one "service<TAB>range" line for each provider that the service needs
 #   PIPELINE_COMPATIBLE  one "service<TAB>range" line for each neighbour that may be older
+#   PIPELINE_MIN_ROLLBACK the rollback floor of the key minRollbackVersion, or empty if the key is missing or wrong
 PROBLEMS=''
 PIPELINE_SERVICE=''
 PIPELINE_REQUIRES=''
 PIPELINE_COMPATIBLE=''
+PIPELINE_MIN_ROLLBACK=''
 
-# The program of jq gives one line for each fact: K key, S service, T section and its type, E section, service and range.
+# The program of jq gives one line for each fact: K key, S service, T section and its type, E section, service and range,
+# M the text of minRollbackVersion (a tab or a line break in it becomes a "?", so the text cannot add a fact),
+# W the type of minRollbackVersion when it is not text.
 # shellcheck disable=SC2016 # the dollar signs are variables of jq
 readonly PIPELINE_FACTS='
   if type != "object" then "N"
@@ -200,7 +234,9 @@ readonly PIPELINE_FACTS='
     ("S\t" + (if (.service | type) == "string" then .service else "" end)),
     (["requires", "compatible"][] as $s | "T\t" + $s + "\t" + ((.[$s] // {}) | type)),
     (["requires", "compatible"][] as $s | (.[$s] // {}) | select(type == "object") | to_entries[]
-      | "E\t" + $s + "\t" + .key + "\t" + (.value | if type == "string" then . else "(not text)" end))
+      | "E\t" + $s + "\t" + .key + "\t" + (.value | if type == "string" then . else "(not text)" end)),
+    (select(has("minRollbackVersion")) | .minRollbackVersion
+      | if type == "string" then "M\t" + gsub("[\t\n\r]"; "?") else "W\t" + type end)
   end'
 
 validate_pipeline() {
@@ -209,6 +245,7 @@ validate_pipeline() {
   PIPELINE_SERVICE=''
   PIPELINE_REQUIRES=''
   PIPELINE_COMPATIBLE=''
+  PIPELINE_MIN_ROLLBACK=''
   if [[ ! -f "$file" ]]; then
     PROBLEMS="$file does not exist. A service repository needs this file. The README of lab-workflows describes its format."
     return 1
@@ -226,9 +263,19 @@ validate_pipeline() {
     case "$kind" in
       K)
         case "$a" in
-          service | requires | compatible) ;;
-          *) problems+="$file has the unknown key \"$a\". The keys are service, requires and compatible."$'\n' ;;
+          service | requires | compatible | minRollbackVersion) ;;
+          *) problems+="$file has the unknown key \"$a\". The keys are service, requires, compatible and minRollbackVersion."$'\n' ;;
         esac
+        ;;
+      M)
+        if valid_version "$a"; then
+          PIPELINE_MIN_ROLLBACK="$a"
+        else
+          problems+="\"minRollbackVersion\" in $file is \"$a\", which is not a version of the form 1.2.3. Use the oldest version that can run against the current data, for example \"0.8.0\"."$'\n'
+        fi
+        ;;
+      W)
+        problems+="\"minRollbackVersion\" in $file must be text with a version, for example \"0.8.0\", but it is a $a."$'\n'
         ;;
       S)
         PIPELINE_SERVICE="$a"
@@ -335,6 +382,31 @@ fetch_deployed() {
   awk -F'\t' 'NF == 2 { name = $1; sub("^/lab/", "", name); sub("/version$", "", name); print name "\t" $2 }' <<< "$output"
 }
 
+# fetch_floor <service>
+# Prints the value of the parameter /lab/<service>/min-rollback-version. A service with no such parameter has no floor:
+# then it prints nothing and returns 0. Any other AWS error (no login, no permission, a throttle) returns 1
+# and prints the text of the error to stderr. The caller must not read such an error as "no floor".
+# The command get-parameter gives the error ParameterNotFound for a missing parameter. The command get-parameters would not.
+fetch_floor() {
+  local service="$1" value errors errors_file code=0
+  errors_file="$(mktemp)"
+  value="$(aws ssm get-parameter --name "/lab/${service}/min-rollback-version" --query 'Parameter.Value' --output text 2> "$errors_file")" || code=$?
+  errors="$(cat "$errors_file")"
+  rm -f "$errors_file"
+  if ((code == 0)); then
+    # The value goes into a log line. A line break in it could start a workflow command, so it becomes a "?" and the value then
+    # fails the check for a version. The one CR at the end of a line from a Windows tool goes away first.
+    value="${value%$'\r'}"
+    printf '%s\n' "${value//[$'\r\n']/?}"
+    return 0
+  fi
+  if [[ "$errors" == *ParameterNotFound* ]]; then
+    return 0
+  fi
+  printf '%s\n' "$errors" >&2
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # The check
 # ---------------------------------------------------------------------------
@@ -383,7 +455,7 @@ check() {
   local environment="${PF_ENVIRONMENT:-}" file="${PF_PIPELINE_FILE:-$DEFAULT_PIPELINE_FILE}" version="${PF_VERSION:-}"
   local tested="${PF_TESTED_WITH:-}" mode="${PF_MODE:-release}" override="${PF_REQUIRES_OVERRIDE:-}"
   local service requires compatible deployed own names facts kind a b
-  local tested_release='' tested_versions='' name range found verdict accepted tested_version line
+  local tested_release='' tested_versions='' name range found verdict accepted tested_version line floor=''
 
   case "$environment" in
     test | staging | production) ;;
@@ -546,10 +618,50 @@ check() {
     notice 'No tested set' 'No record of tested versions exists for this release, so the set was not compared.'
   fi
 
+  # 4. The rollback floor (issue 33). A rollback restores code, not data. A migration can leave data that an older version
+  # cannot read. The floor is the oldest version that can still read it. A dry run has no version, so it compares nothing.
+  if [[ -n "$version" ]]; then
+    case "$mode" in
+      redeploy)
+        # The floor lives in SSM, with the data. The file pipeline.json of an old tag cannot say what the data needs today.
+        if ! floor="$(fetch_floor "$service")"; then
+          echo "::error::The rollback floor in $environment could not be read from SSM. This is not a result of the check. Check the AWS login and the permission ssm:GetParameter on /lab/*." >&2
+          return 1
+        fi
+        if [[ -n "$floor" ]] && ! valid_version "$floor"; then
+          echo "::error::The SSM parameter /lab/$service/min-rollback-version in $environment holds \"$floor\", which is not a version of the form 1.2.3. This is not a result of the check. Only the migration step of $service writes this parameter. Deploy $service again through the pipeline." >&2
+          return 1
+        fi
+        verdict="$(floor_verdict "$version" "$floor")"
+        case "$verdict" in
+          none) add_row 'rollback floor' "$service" "$version" 'none' 'ok: no floor recorded' ;;
+          ok) add_row 'rollback floor' "$service" "$version" "$floor" 'ok: not below the floor' ;;
+          below)
+            add_row 'rollback floor' "$service" "$version" "$floor" 'FAILED: below the floor'
+            fail 'Rollback refused' "$(rollback_refusal "$service" "$version" "$environment" "$floor")"
+            ;;
+        esac
+        ;;
+      release)
+        # The key minRollbackVersion of pipeline.json says which version this release needs as the oldest one. It cannot name
+        # a version that is newer than the release itself.
+        if [[ -n "$PIPELINE_MIN_ROLLBACK" ]]; then
+          if [[ "$(floor_verdict "$version" "$PIPELINE_MIN_ROLLBACK")" == below ]]; then
+            add_row 'rollback floor' "$service" "$version" "$PIPELINE_MIN_ROLLBACK (pipeline.json)" 'FAILED: the floor is above the release'
+            fail 'Floor above release' "pipeline.json declares minRollbackVersion $PIPELINE_MIN_ROLLBACK for $service, but this release is $service $version, which is older. A floor cannot be newer than the release that declares it. Lower minRollbackVersion to $version or less, or release a newer version."
+          else
+            add_row 'rollback floor' "$service" "$version" "$PIPELINE_MIN_ROLLBACK (pipeline.json)" 'ok: the floor is not above the release'
+          fi
+        fi
+        ;;
+    esac
+  fi
+
   write_summary "$environment" "$service" "$version" "$mode"
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     {
       echo "previous-version=${own}"
+      echo "min-rollback-version=${floor}"
       if ((FAILURES == 0)); then echo 'result=pass'; else echo 'result=fail'; fi
     } >> "$GITHUB_OUTPUT"
   fi
