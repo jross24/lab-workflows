@@ -227,7 +227,9 @@ export function renderComment({
   accountIds,
   missingStacks = [],
 }) {
-  const none = summary.add + summary.change + summary.replace + summary.delete === 0;
+  // A diff of outputs or parameters only has no resource line, but it is still a change.
+  const hasChangeLines = /^\[[+~-]\] /m.test(diff);
+  const none = summary.add + summary.change + summary.replace + summary.delete === 0 && !hasChangeLines && stateful.length === 0;
   const parts = [markerFor(key), `### ${title}`, ''];
 
   parts.push(
@@ -253,7 +255,7 @@ export function renderComment({
   const guard = guardSection({ stateful, verdict, label });
   if (guard) parts.push('', guard);
 
-  if (diff.trim().length > 0) {
+  if (!none && diff.trim().length > 0) {
     const shown = truncateMiddle(diff, MAX_DIFF_CHARACTERS);
     const fence = fenceFor(shown);
     parts.push('', '<details>', '<summary>Show the diff</summary>', '', `${fence}text`, shown, fence, '', '</details>');
