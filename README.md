@@ -17,7 +17,8 @@ The pipeline has reusable workflows and several composite actions.
 | `actions/supersede` | Cancels the older releases that wait for the production reviewer. |
 | `actions/propose-rollback` | After a failed smoke check in Production, it starts the redeploy of the earlier version. That run waits for the reviewer. It does not start the redeploy if the earlier version is below the rollback floor. |
 | `actions/next-version` | Works out the next version from the commit titles. |
-| `actions/deploy` | Deploys one CDK stage from the cloud assembly of the build job. |
+| `actions/deploy` | Deploys one CDK stage from the cloud assembly of the build job. It also compares the published parameters of the service before and after the deployment, and warns if a consumer must be redeployed. See "Provider parameters". |
+| `actions/published-params` | The scripts and the tests behind that comparison. |
 | `actions/lock-acquire` | Takes the lock of the shared Test environment. It waits when another release holds the lock. |
 | `actions/lock-release` | Releases that lock. It never fails the release. |
 | `actions/install-tool` | Installs a tool from a pin: a version, a url and a SHA-256. It checks the download before it uses it. |
@@ -935,7 +936,7 @@ The check fails early, and the message says what to do. For example:
 ```
 
 The check also finds the case of a provider that runs in the environment but publishes no version (a stack from before the parameter existed). The message says to release the provider once.
-The check does not solve the second effect of issue 16: a consumer keeps the old URL of a provider until its next release. That is a property of CloudFormation, and the README of each service describes it.
+The check does not solve the second effect of issue 16: a consumer keeps the old URL of a provider until its next deployment. That is a property of CloudFormation. The step after the deployment of the provider detects it and tells the person. See "Provider parameters".
 
 ### The check of the tested set
 
@@ -1020,6 +1021,115 @@ gh workflow run check.yml --repo jross24/lab-svc-account -f environment=producti
 ```
 
 The job runs in the GitHub environment of the input. A dry run against `production` waits for the production reviewer, like every job in that environment.
+
+## Provider parameters: a new URL for a consumer that is already deployed
+
+Issue [lab-platform#45](https://github.com/jross24/lab-platform/issues/45) is the second effect of issue 16.
+
+### The effect
+
+A provider publishes SSM parameters for its consumers. Core publishes `/lab/core/url` and `/lab/core/api-arn`. Catalogue and account publish `/lab/<service>/url`. Flags publishes the three IDs of its AppConfig configuration.
+CloudFormation reads such a parameter when it deploys the consumer. The consumer does not read it when it runs.
+If the provider gets a new value, for example a new API URL after a replace, a consumer that is already deployed keeps the old value. It calls the old URL until its next deployment.
+Nothing in the consumer shows this, and the deployment of the provider is correct.
+
+### The decision
+
+The owner chose to **detect and tell**. Two other ways were rejected:
+
+- **The consumer reads the URL when it runs.** Each cold start would make one SSM call, on every request path, for an event that almost never happens. The cost is certain and the benefit is rare.
+- **The provider starts the redeploy of its consumers.** The token of a workflow (`GITHUB_TOKEN`) works in its own repository only. To start a workflow in another repository, the lab needs another token, and it has none.
+
+So `actions/deploy` reads the published parameters before and after each deployment. If a value changed, the job tells the person which consumers to redeploy. The job does not fail.
+
+### How the check works
+
+`actions/deploy` runs two steps of `actions/published-params/cli.mjs`. Every deploy job of `release.yml` and `redeploy.yml` uses the action, so the check runs in Test, Staging and Production, also in a redeploy.
+
+1. **Before `cdk deploy`.** The script reads the templates of the stage in the cloud assembly (`cdk.out/assembly-<Stage>/*.template.json`). It lists the resources of the type `AWS::SSM::Parameter` with a name under `/lab/<service>/`. It reads their values with `ssm:GetParameters` and keeps them in a file of the runner.
+2. **After `cdk deploy`.** It reads the same names again and compares the two sets of values.
+
+The names come from the templates because the role `github-deploy` can only read. It has `ssm:GetParameter` and `ssm:GetParameters` on `/lab/*`, and the check uses the same permission as the checks before a deployment. It has no `ssm:GetParametersByPath`, so it cannot list "everything under `/lab/core/`". A listing would need a wider role, and the role stays as it is.
+
+The check ignores three kinds of name. A consumer stack does not read them when it deploys, so a change of them would be a false alarm:
+
+| Name | Why it is ignored |
+| --- | --- |
+| `/lab/<service>/version` | Every release changes it. |
+| `/lab/<service>/min-rollback-version` | The migration step of the service writes it. Only the checks before a deployment read it. |
+| `/lab/flags/state/<flag>` | The declared state of a flag, for the E2E suite. A consumer reads a flag when it runs, from AppConfig. |
+
+For each other name there are four results:
+
+| Before | After | Result |
+| --- | --- | --- |
+| a value | the same value | No change. |
+| a value | another value | **Changed.** A warning. |
+| no value | a value | New. The first deployment of a service, or a new parameter. No consumer holds an old value, so there is no warning. |
+| a value | no value | Removed. A note. The next deployment of a consumer that reads it fails, with a message from CloudFormation. |
+
+The check reads the names from the templates of the release that it deploys. A release that deletes the resource also removes the name from the list, so the check does not see that removal.
+
+### Which consumers
+
+The check reads `consumers` from `contract.json` of the service (see "Contract tests"). Core lists catalogue and account. Catalogue and account list web.
+For each consumer it reads `/lab/<consumer>/version` in the same environment. The warning then names the version that runs there now.
+A service with no `contract.json`, or with no `consumers` in it, gets a generic text: redeploy each service that has the provider in `requires` of its `pipeline.json`. Flags is such a service today.
+
+### What a warning looks like
+
+The job summary of the deploy job shows an alert, and the step writes one annotation. Core got a new URL in Production, in this example:
+
+```
+> [!WARNING]
+> **core has a new value for 1 published parameter in production.** The deployment of core is correct, and this job did not fail.
+>
+> Changed: `/lab/core/url`.
+>
+> A consumer reads a published parameter when CloudFormation deploys the consumer. It does not read it when it runs. So each consumer keeps the old value until its next deployment.
+>
+> Do this for each consumer:
+>
+> - Redeploy catalogue 0.7.1 to production with its `redeploy` workflow (repository lab-svc-catalogue).
+> - Redeploy account 0.6.0 to production with its `redeploy` workflow (repository lab-svc-account).
+```
+
+```
+::warning title=Provider parameter changed::core has a new value in production for /lab/core/url. A consumer reads a published parameter only when it is deployed, so it keeps the old value. Redeploy catalogue 0.7.1 to production with its `redeploy` workflow (repository lab-svc-catalogue). Redeploy account 0.6.0 to production with its `redeploy` workflow (repository lab-svc-account).
+```
+
+When nothing changed, the log has one line and the summary says "No change":
+
+```
+published parameters of core in production: no change (2 compared)
+```
+
+The text names parameters and never prints a value. A value such as `/lab/core/api-arn` holds the account ID, and the repository is public.
+
+### The check never fails the job
+
+The provider is correct, so the job stays green. This holds in four more cases. The script returns 0 in all of them, and the steps also have `continue-on-error`. The step then writes a warning that says "the check did not run":
+
+- the stage has no folder in the cloud assembly;
+- SSM cannot be read;
+- a name in a template is not a plain string, for example `Fn::Join` (a notice);
+- the script itself fails.
+
+The warning is not a repair. A person must start the redeploys.
+
+### What still catches a missed redeploy
+
+The check tells. It does not act, and nobody has to read a summary. If a person misses the warning, only these checks can still catch the stale consumer, and both come late:
+
+- **The E2E suite in Test.** The next release of any service runs the suite against Test. It loads the page and calls the public APIs. A consumer that calls a dead URL can make a test fail there.
+- **The smoke checks in Staging and Production.** They run in the NEXT release of a service to that environment, and only then. Until that release, a stale consumer in Staging or Production has no check.
+
+Neither check fails if the old URL still works. A consumer that talks to an old API that still runs passes both. Only the warning of this section finds that case.
+
+### Tests
+
+The logic is in `actions/published-params/lib.mjs` and the commands in `cli.mjs`. The tests cover: no change, a changed value, a new parameter, a removed parameter, the version that is ignored, the first deployment, a read that fails and a value that must not be printed.
+The tests use a fake for the AWS call. Run them with `node --test actions/published-params/lib.test.mjs actions/published-params/cli.test.mjs`.
 
 ## The tested set
 
@@ -1828,7 +1938,7 @@ DRY_RUN=true ISSUE_REPO=jross24/lab-workflows node actions/tool-pins/cli.mjs run
 ## Checks of this repository
 
 The `ci` workflow runs on each pull request. It installs `actionlint` and `gitleaks` with `actions/install-tool`.
-It runs the tests of the scripts: next-version, lock, preflight, supersede, propose-rollback, install-tool, changed-paths and secret-scan. It also runs the tests of the Node scripts for the diff comment, the preview, the contract check and the accepted advisories, and the tests of the scheduled checks (see "Scheduled checks"). The new tests need `jq`, which the runner image has. It also runs `shellcheck` and `actionlint`.
+It runs the tests of the scripts: next-version, lock, preflight, supersede, propose-rollback, install-tool, changed-paths and secret-scan. It also runs the tests of the Node scripts for the diff comment, the preview, the contract check and the accepted advisories, the tests of the check of the published parameters, and the tests of the scheduled checks (see "Scheduled checks"). The new tests need `jq`, which the runner image has. It also runs `shellcheck` and `actionlint`.
 The step "check the list of accepted advisories" fails when an entry of `accepted-advisories.json` is past its date or lacks a field.
 
 `actionlint` is not optional. It checks every workflow file in `.github/workflows/`, and it runs `shellcheck` on the `run:` scripts.
