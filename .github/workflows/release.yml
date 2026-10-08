@@ -224,6 +224,7 @@ jobs:
   # Shows in the summary of the release which versions the E2E suite tested.
   # A called workflow that failed still gives its outputs to this job. The lab checked this on 2026-10-08.
   # The script below writes "not recorded" for an empty output anyway, for example when the suite never ran.
+  # It also prints the summary to the log, so the log shows what the outputs held.
   e2e-summary:
     needs: [e2e]
     if: ${{ always() && needs.e2e.result != 'skipped' }}
@@ -256,7 +257,7 @@ jobs:
               echo
             fi
             echo "lab-e2e commit: \`${E2E_COMMIT:-unknown}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Records the set of versions that passed in Test. The record is a job output, and it is a file on the GitHub release
   # (tested-with.json). Staging and Production compare their own versions with this set before they deploy.
