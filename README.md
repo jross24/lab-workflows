@@ -644,6 +644,31 @@ The stack of the service must have the name `<repository>-<namespace>`, and it m
 - A workflow with `workflow_dispatch` cannot start from a branch until the file is on the default branch. To test the sweeper, a temporary `push` trigger on the test branch started it.
 - `cdk deploy --tags` replaces the tags that the app sets on the stack. The resources keep the tag `lab-namespace`, and the stack keeps the two preview tags.
 
+## What the real runs showed for the diff and the preview
+
+These runs are the evidence. The pull requests were throwaway pull requests. A person closed them without a merge, except for the one pull request that added the preview caller.
+
+| Claim | Run | What it showed |
+| --- | --- | --- |
+| A pull request can assume `github-pr-diff` only through `diff.yml` on the allowed ref | [lab-svc-catalogue 37752196502](https://github.com/jross24/lab-svc-catalogue/actions/runs/37752196502) | The job in the shared file logged in. A job in another file of this repository, and a job in the service repository itself, got `Not authorized to perform sts:AssumeRoleWithWebIdentity`. |
+| The comment against Production | [lab-svc-account 37756392071](https://github.com/jross24/lab-svc-account/actions/runs/37756392071) | All eight checks passed. The comment said "No change" against the real Production stack, with the version read from the deployed template. |
+| The comment changes in place | [lab-svc-catalogue 37754254290](https://github.com/jross24/lab-svc-catalogue/actions/runs/37754254290) | A second push changed the same comment. The pull request had one comment. |
+| The stateful change guard blocks, against the real Production stack | [lab-svc-catalogue 37761208798](https://github.com/jross24/lab-svc-catalogue/actions/runs/37761208798), attempt 1 | A renamed log group gave `[-] AWS::Logs::LogGroup ... destroy`. The job `report` failed, and the comment named the resource and the label. |
+| The label lets it pass | The same run, attempt 2 | After the label `destructive-change-approved` and "Re-run failed jobs", the job passed. The comment said "Approved by the label". |
+| No account number leaks | The same run | A search of the 1900 lines of the log and of the comment for the five account IDs and for any run of 12 digits found nothing. |
+| The preview life cycle | [deploy 37757139064](https://github.com/jross24/lab-svc-catalogue/actions/runs/37757139064), [push 37757515618](https://github.com/jross24/lab-svc-catalogue/actions/runs/37757515618), [destroy 37758269414](https://github.com/jross24/lab-svc-catalogue/actions/runs/37758269414) | The label deployed the stack `lab-svc-catalogue-pr-13`. The URL answered HTTP 200 with the version `0.0.0-pr13.<commit>` and the data of the baseline core. A push changed the version in the answer. The close removed the stack: `list-stacks` showed `DELETE_COMPLETE`, the parameters under `/lab/ns/pr-13` were gone, and the baseline still answered. |
+| The first destroy failed | [37757824926](https://github.com/jross24/lab-svc-catalogue/actions/runs/37757824926) | `not authorized to perform: sts:TagSession`. The chained login now sets `role-skip-session-tagging`. |
+| The final caller works from `@main`, and a merge removes the preview | [deploy 37763083614](https://github.com/jross24/lab-svc-catalogue/actions/runs/37763083614), [merge 37763784328](https://github.com/jross24/lab-svc-catalogue/actions/runs/37763784328) | The pull request that added the caller carried the label. Its preview answered with 200. The merge closed the pull request, and the stack `lab-svc-catalogue-pr-15` went to `DELETE_COMPLETE`. |
+| The sweeper removes the preview of a closed pull request | [37759838191](https://github.com/jross24/lab-workflows/actions/runs/37759838191) | A stack tagged for the closed pull request 13 stayed behind. The sweeper printed `remove lab-svc-catalogue-pr-13: The pull request is closed.` and removed it. |
+| The sweeper removes an old preview | [37760297701](https://github.com/jross24/lab-workflows/actions/runs/37760297701) | With a limit of 0.001 days, it removed the preview of an open pull request. |
+| A destroy for a stack that is gone passes | [37760444311](https://github.com/jross24/lab-svc-catalogue/actions/runs/37760444311) | Closing a pull request whose stack the sweeper had removed printed `does not exist. Nothing to remove.` and succeeded. |
+
+What the runs did not prove:
+
+- A pull request from a **fork**. The owner has one GitHub account, and a user cannot fork his own repository. Unit tests cover the decision (`decideRun` and `decidePreview`), and the behaviour of GitHub is from its documentation.
+- A **Dependabot** pull request. Unit tests only.
+- The sweeper on its **schedule**. The runs above started from a branch with a temporary trigger. The first scheduled run is at the next hour that fits the cron expression.
+
 ## Secrets, variables and OIDC in a reusable workflow
 
 The account ID of each environment is an environment secret of the service repository.
