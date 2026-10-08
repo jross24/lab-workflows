@@ -5,6 +5,7 @@ name: pr
 # Production with a role that can only read. The README section "The cdk diff comment" explains the security model.
 # The caller must give these permissions: contents: read, id-token: write, pull-requests: write.
 # The caller must pass its secrets with "secrets: inherit".
+# The job contracts compares contract.json and expectations.json with the releases that run in Production. It needs no AWS access.
 on:
   workflow_call:
     inputs:
@@ -94,6 +95,25 @@ jobs:
           tool: actionlint
       - if: steps.changes.outputs.changed == 'true'
         run: actionlint
+
+  # Compares contract.json and expectations.json with the contract and the expectations of the releases that run in Production
+  # (lab-platform#34). A breaking change of a contract fails the job, unless the pull request has the label
+  # breaking-change-approved. A consumer that would break always fails it. The job reads only public data and the labels,
+  # so it needs no AWS access and no write permission. A repository without contract files gets a notice, and the job passes.
+  # The name of the job is part of the name of the required check: pr / contracts.
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jross24/lab-workflows/actions/contract-check@main
+        with:
+          token: ${{ github.token }}
 
   # Shows what a release would change in Production, as one comment that each push updates (lab-platform#13).
   # A delete or a replacement of a stateful resource fails this job until the pull request has the label
