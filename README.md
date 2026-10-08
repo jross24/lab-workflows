@@ -18,6 +18,9 @@ The pipeline has three reusable workflows and several composite actions.
 | `actions/changed-paths` | Tells whether a pull request changes a file under some paths, for example `.github/`. |
 | `.github/workflows/diff.yml` | Shows the `cdk diff` against Production as one comment on a pull request, and blocks a delete of a stateful resource. See "The cdk diff comment". |
 | `actions/cdk-diff` | The scripts and the tests behind `diff.yml`. |
+| `.github/workflows/preview.yml` | Deploys a temporary environment for a pull request with the label `preview`, and removes it when the pull request closes. See "The temporary environment of a pull request". |
+| `.github/workflows/preview-sweeper.yml` | Removes the previews of closed pull requests and the previews that are too old. It runs every six hours. |
+| `actions/preview` | The scripts and the tests behind the two preview workflows. |
 | `actions/secret-scan` | Scans the commits of a pull request for secrets with `gitleaks`. It never prints a secret. |
 
 ## Build once, promote the same artefact
@@ -512,6 +515,125 @@ The role trusts `diff.yml` on `main` only. To test a branch, use the `dev` accou
 - The default `--method auto` of `cdk diff` creates a change set and uses the deploy role. That is a write call. `--method template` uses the lookup role. `--template <file>` needs no AWS call.
 - The lookup role has the managed policy `ReadOnlyAccess`, so it can read S3 objects and DynamoDB items. The diff does not use it.
 - The context value `github.job_workflow_sha` is empty in a reusable workflow, although the documentation lists it. The OIDC claim `job_workflow_sha` has the value.
+
+## The temporary environment of a pull request
+
+A pull request with the label `preview` gets its own copy of the service in the developer account (`lab-dev`).
+The workflow `preview.yml` deploys the `Dev` stage of the service under a name that belongs to the pull request.
+A comment on the pull request shows the URL. A push deploys the new commit. The preview goes when the pull request closes or when the label goes.
+Today the repository [lab-svc-catalogue](https://github.com/jross24/lab-svc-catalogue) uses it. It is the reference implementation.
+
+### The names
+
+The pipeline uses the namespace `pr-<number>`. The service builds all its names from the namespace. Two pull requests, or a pull request and a laptop deployment, never share a name.
+
+| What | Name for pull request 12 of lab-svc-catalogue |
+| --- | --- |
+| Namespace | `pr-12` |
+| Stack | `lab-svc-catalogue-pr-12` |
+| SSM parameter of the URL | `/lab/ns/pr-12/catalogue/url` |
+| Dashboard | `lab-svc-catalogue-pr-12` |
+| Version (a metric dimension, so the alarms stay apart) | `0.0.0-pr12.<first 7 characters of the commit>` |
+| Tags of the stack | `lab-preview-repo=jross24/lab-svc-catalogue`, `lab-preview-pr=12` |
+
+A developer who deploys from a laptop picks another namespace, for example `-c namespace=jonathan`. The namespace `pr-<number>` is reserved for the pipeline.
+The baseline copy of the service has no namespace. It keeps the plain names (`lab-svc-catalogue`, `/lab/catalogue/url`).
+
+### How a preview finds the service it calls
+
+A preview of a consumer needs its provider. The catalogue calls core.
+The lab keeps a long-lived baseline copy of all four services in `lab-dev`. A developer deployed it from a laptop with `cdk deploy -c dev=true "Dev/*"`. This is the "developer account baseline".
+A preview reads `/lab/core/url` and `/lab/core/api-arn` of the baseline, like every `Dev` stage does. So a preview of the catalogue calls the baseline core.
+
+The trade-off: a preview tests a change of the catalogue against the baseline core, and not against a change of core in a pull request.
+To test both together, core needs the namespace too, and the consumer needs a `coreNamespace` context value. Issue [lab-platform#36](https://github.com/jross24/lab-platform/issues/36) lists the work.
+
+### The jobs
+
+| Job | What it holds | What it runs |
+| --- | --- | --- |
+| `plan` | Nothing | A script of this repository. It reads the event and decides: deploy, destroy or nothing. |
+| `build` | Nothing (no AWS credentials, no write token) | The code of the pull request: `npm ci` and `cdk synth` with the namespace. Then a check of the stack name. |
+| `deploy` | The AWS role `github-preview` | `cdk deploy` of the assembly from `build`. Then a smoke test: the URL must answer HTTP 200. |
+| `destroy` | The AWS role `github-preview`, and the CDK deploy role through it | AWS CLI calls only. It runs no code of the pull request. |
+| `comment` | The right to write the one comment | A script of this repository. |
+
+What the event means:
+
+| Event | Result |
+| --- | --- |
+| A push, or a pull request opened or reopened, with the label | Deploy |
+| The label `preview` is added | Deploy |
+| The label `preview` is removed | Destroy |
+| A pull request with the label closes (merged or not) | Destroy |
+| A pull request without the label closes, another label changes, a fork, Dependabot, or no account secret | Nothing. A notice in the log says why. |
+
+A pull request that never had the label needs no AWS login when it closes.
+
+### The sweeper
+
+`preview-sweeper.yml` runs every six hours, and by hand. It lists the stacks of `lab-dev` and removes a preview when its pull request is closed or merged, or when the preview is older than three days.
+It is the safety net for a destroy that failed or an old pull request that someone forgot. A forgotten preview must not cost money for ever.
+
+The sweeper removes a stack only if its tags say it is a preview AND its name fits the tags (`<repository>-pr-<number>`). A person could tag the baseline stack with a preview tag. The sweeper skips it and says why.
+The role `github-preview-sweeper` can assume the CDK deploy role only, and only the scheduled workflow on `main` of this repository can use it.
+
+### Security note: what stops a pull request from doing harm in `lab-dev`, and what does not
+
+A preview runs the CDK code of a pull request and deploys what the code describes. That is a deployment of unreviewed code, by design.
+
+What stops harm:
+
+- **The account is the fence.** `lab-dev` holds no customer data, no secret and no trust into another account. The baseline services are the only things in it.
+- **Who can start it.** The trust policy of `github-preview` accepts a token only from a `pull_request` job of a repository `jross24/lab-*`, and only if the job runs the file `preview.yml` of this repository on `main`. A pull request from a fork gets no token. A job in the repository of the pull request, with a workflow of its own, is refused.
+- **What the role can do.** It can assume two roles: the CDK deploy role and the CDK file publishing role of `lab-dev`. It has no other permission.
+- **Code and credentials are apart.** The build runs the code of the pull request and has no credential. The deploy job takes only the finished cloud assembly.
+- **The names are checked.** The build fails unless the assembly holds exactly one stack, `<repository>-pr-<number>`. Code that does not know the namespace makes the baseline name. The deploy job checks again before it has any credential. The destroy job removes a stack only if its tags name this repository and this pull request.
+- **Cost.** A closed pull request removes its preview. The sweeper removes the rest.
+
+What does not stop harm:
+
+- **The CloudFormation execution role has `AdministratorAccess`.** This is the default of `cdk bootstrap`. A template of a pull request can create any resource in `lab-dev`: an IAM user, a large instance, a custom resource that calls any AWS API, even one that removes the baseline.
+- **The CDK CLI of the pull request runs with the credentials.** The deploy job installs the CLI from the lockfile of the pull request. It can call the CDK deploy role directly, for example `DeleteStack` on a baseline stack. This gives nothing that the template does not give already.
+- **The label is not an authorisation.** A person with write access to the repository can add the label to his own pull request. The label saves cost. It does not protect the account.
+- **There is no budget alarm and no service control policy.** A mistake or an attack can cost money until a person sees it.
+
+The lab accepts this because `lab-dev` is a throwaway account and only the owner can open a pull request in a lab repository.
+A team would add three things: a custom CloudFormation execution policy with a permissions boundary for the bootstrap of the dev account, a service control policy that limits regions and services, and a budget alarm.
+
+### Adopt it in another service
+
+1. Give the service the `namespace` context value. The README of lab-svc-catalogue has the checklist. Issue [lab-platform#36](https://github.com/jross24/lab-platform/issues/36) lists what core, account and web must change.
+2. Add the repository secret `PR_ACCOUNT_ID_DEV` (the ID of the `lab-dev` account) and the label `preview`.
+3. Add the caller `.github/workflows/preview.yml`:
+
+```yaml
+name: preview
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled, closed]
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+jobs:
+  preview:
+    uses: jross24/lab-workflows/.github/workflows/preview.yml@main
+    secrets: inherit
+```
+
+The input `smoke-path` is the path that must answer HTTP 200. The default is `/products`.
+The stack of the service must have the name `<repository>-<namespace>`, and it must have the output `ApiUrl`.
+
+### What the real runs showed
+
+- The role chain needs `role-skip-session-tagging: true`. `configure-aws-credentials` tags the new session when it chains into another role. A tagged session needs `sts:TagSession` in the trust policy of the target role, and the CDK bootstrap roles do not have it.
+  The first destroy failed with `not authorized to perform: sts:TagSession`. The step now skips the tags.
+- A workflow with `workflow_dispatch` cannot start from a branch until the file is on the default branch. To test the sweeper, a temporary `push` trigger on the test branch started it.
+- `cdk deploy --tags` replaces the tags that the app sets on the stack. The resources keep the tag `lab-namespace`, and the stack keeps the two preview tags.
 
 ## Secrets, variables and OIDC in a reusable workflow
 
