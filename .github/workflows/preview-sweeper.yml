@@ -7,6 +7,9 @@ name: preview-sweeper
 #
 # The job runs on main of this repository. The role github-preview-sweeper trusts that and nothing else.
 on:
+  # TEMPORARY TEST TRIGGER. Remove before the merge.
+  push:
+    branches: [feat/preview]
   schedule:
     - cron: '23 */6 * * *'
   workflow_dispatch:
