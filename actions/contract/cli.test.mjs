@@ -82,6 +82,10 @@ describe('repositoryOf', () => {
     assert.equal(repositoryOf('core'), 'lab-svc-core');
     assert.equal(repositoryOf('catalogue'), 'lab-svc-catalogue');
   });
+
+  it('names lab-flags for flags, not lab-svc-flags (the same rule as repository_of in preflight.sh)', () => {
+    assert.equal(repositoryOf('flags'), 'lab-flags');
+  });
 });
 
 describe('versionOf', () => {
