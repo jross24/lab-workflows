@@ -441,7 +441,11 @@ check() {
       esac
     done <<< "$facts"
     found="$(lookup "$service" "$tested_versions")"
-    if [[ -n "$version" && -n "$found" && "$found" != "$version" ]]; then
+    if [[ -n "$version" && -z "$found" ]]; then
+      echo "::error title=Wrong record of tested versions::The record has no version of $service, so it does not say that the suite tested this release." >&2
+      return 1
+    fi
+    if [[ -n "$version" && "$found" != "$version" ]]; then
       echo "::error title=Wrong record of tested versions::The record belongs to $service $found, but this deployment is $service $version." >&2
       return 1
     fi

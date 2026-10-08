@@ -477,6 +477,34 @@ contains 'the message names both versions' 'The record belongs to web 0.3.9, but
 PF_TESTED_WITH='{"versions":"x"}' run_check
 check_equal 'a record with no versions object is refused' '1' "$status"
 
+PF_TESTED_WITH='{"release":"v0.4.0","versions":{}}' run_check
+check_equal 'a record with an empty versions object does not say that the suite tested this release' '1' "$status"
+contains 'the message says that the record has no version of the service' 'The record has no version of web' "$output"
+
+PF_TESTED_WITH='{"release":"v0.4.0","versions":{"catalogue":"0.3.1","core":"0.5.1"}}' run_check
+check_equal 'a record without the own service is refused' '1' "$status"
+
+PF_VERSION='' PF_TESTED_WITH='{"release":"v0.4.0","versions":{"catalogue":"0.3.1","core":"0.5.1"}}' run_check
+check_equal 'a dry run needs no own version in the record' '0' "$status"
+
+echo '--- fetch_deployed'
+
+PATH_BEFORE="$PATH"
+fake_none="$work/none-bin"
+mkdir -p "$fake_none"
+printf '#!/usr/bin/env bash
+echo None
+' > "$fake_none/aws"
+chmod +x "$fake_none/aws"
+check_equal 'the answer None of the AWS CLI means no version' '' "$(PATH="$fake_none:$PATH" fetch_deployed core web)"
+printf '#!/usr/bin/env bash
+printf "/lab/core/version\t0.5.1\n/lab/web/version\t0.4.0\n"
+' > "$fake_none/aws"
+check_equal 'two lines become service and version' $'core	0.5.1
+web	0.4.0' "$(PATH="$fake_none:$PATH" fetch_deployed core web)"
+PATH="$PATH_BEFORE"
+
+
 echo '--- check: the dry run and the errors'
 
 PF_TESTED_WITH=''
