@@ -31,6 +31,7 @@ The pipeline has reusable workflows and several composite actions.
 | `actions/contract-check` | Checks the files `contract.json` and `expectations.json` of a service against the releases that run in Production. It needs no AWS access. See "Contract tests". |
 | `actions/contract` | The scripts and the tests behind `contract-check`. |
 | `actions/record-production` | Writes the production marker `deployed-production.json` and uploads it to the GitHub release. See "Contract tests". |
+| `actions/reuse-artefact` | Lets the job `build` take the zip of the GitHub release when the release already holds it, so "Re-run all jobs" does not build again. See "Build once across the attempts of a run". |
 
 ## Build once, promote the same artefact
 
@@ -54,12 +55,30 @@ The pipeline proves this in three ways:
 
 You can also compare the result in AWS. The `CodeSha256` of the Lambda function is the same in each account.
 
+### Build once across the attempts of a run
+
+"Re-run all jobs" runs every job of the release again, with the same commit and the same version. The release of the first attempt exists by then, and the earlier environments may already run the zip of the first attempt.
+A second build could give other bytes, so the claim "the same bytes everywhere" would be false across the attempts.
+The job `build` therefore asks the release first. The action `actions/reuse-artefact` does this:
+
+| What the release holds | What `build` does |
+|---|---|
+| The release does not exist (the first attempt) | It builds, and creates the release. |
+| The release exists, but it lacks the zip or its SHA-256 file (a first attempt stopped in the middle of the upload) | It builds, and adds the files. No environment can hold a zip of this version, because the deploy jobs never started. |
+| The release holds the zip and its SHA-256 file | It downloads both and checks that the file `cdk-out-<tag>.zip.sha256` has one line for the zip and that the zip has this SHA-256. Then it uploads the zip as the artefact of the run. It does not build, it does not run the tests, and it does not upload to the release. The files of the release keep their time of upload. |
+| The lookup of the release fails for another reason than "release not found" | The job fails. If it built, it could replace the files of a release that exists. |
+| The zip does not match its SHA-256 file | The job fails. It does not build, because an environment may already run this zip. Look at the release by hand. |
+
+The first step of the job summary names the path: `Path: reuse.` or `Path: build.` with the reason.
+The tests passed in the first attempt, because the release exists only after `build` passed them. The commit of a re-run is the same commit.
+The check of the SHA-256 finds a damaged file or a half upload. It does not find a person who replaced both files of the release. The permission `contents: write` can do that.
+
 ## The release workflow
 
 `release.yml` runs these jobs in this order:
 
 1. `version` reads `pipeline.json`, works out the next version and creates the tag on the released commit.
-2. `build` runs `npm ci`, lint, typecheck, the tests and one `cdk synth -c version=<version>`. It uploads the zip as a workflow artefact. It also attaches the zip to a GitHub release with the name of the tag. If the repository has `contract.json` or `expectations.json`, it attaches them too.
+2. `build` first looks at the GitHub release of the version. If the release holds the zip and its SHA-256 file, `build` downloads them, checks the SHA-256 and uploads that zip as the workflow artefact. It does not build. Otherwise `build` runs `npm ci`, lint, typecheck, the tests and one `cdk synth -c version=<version>`. It uploads the zip as a workflow artefact. It also attaches the zip to a GitHub release with the name of the tag. If the repository has `contract.json` or `expectations.json`, it attaches them too. See "Build once across the attempts of a run".
 3. `lock-test` takes the lock of the Test environment. It waits when another release holds the lock.
 4. `deploy-test` makes sure that this run holds the lock, runs the checks before a deployment, and deploys the stage `Test` in the GitHub environment `test`.
 5. `e2e` runs the end-to-end suite of [lab-e2e](https://github.com/jross24/lab-e2e) against Test.

@@ -6,9 +6,17 @@
 // The tests give a fake. The command line gives the real one (see cli.mjs).
 import { MARKER_ASSET } from './lib.mjs';
 
-// The lab names the repository of a service lab-svc-<name>, except for web. preflight.sh has the same rule.
+// The lab names the repository of a service lab-svc-<name>, except for web (lab-web) and flags (lab-flags).
+// repository_of in actions/preflight/preflight.sh has the same rule. Change both files together.
 export function repositoryOf(service) {
-  return service === 'web' ? 'lab-web' : `lab-svc-${service}`;
+  switch (service) {
+    case 'web':
+      return 'lab-web';
+    case 'flags':
+      return 'lab-flags';
+    default:
+      return `lab-svc-${service}`;
+  }
 }
 
 // The tag of a release is v<version>.

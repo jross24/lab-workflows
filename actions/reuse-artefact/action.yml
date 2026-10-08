@@ -1,0 +1,31 @@
+name: reuse artefact
+description: Takes the artefact that the GitHub release of the version already holds, after it checks the SHA-256. It never builds and never uploads.
+
+# The job build calls this action first. If the output reused is true, the job skips every build step.
+# The job needs the permission contents: read (it has contents: write for the upload of a new release).
+# The action does not check out the repository. The zip and its SHA-256 file are in the working directory when reused is true.
+inputs:
+  tag:
+    description: The tag of the release, for example v1.2.3.
+    required: true
+  token:
+    description: The token for the GitHub API.
+    required: true
+
+outputs:
+  reused:
+    description: The text true if the release holds the artefact and it is in the working directory. The text false if the job must build.
+    value: ${{ steps.reuse.outputs.reused }}
+  digest:
+    description: The SHA-256 of the zip, when reused is true.
+    value: ${{ steps.reuse.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - id: reuse
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REUSE_TAG: ${{ inputs.tag }}
+      run: bash "$GITHUB_ACTION_PATH/reuse.sh"
