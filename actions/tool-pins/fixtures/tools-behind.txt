@@ -1,0 +1,4 @@
+# A test fixture for tool-pins. The pin is old on purpose, so the check finds a tool that is behind.
+# Nothing installs from this file. The hash is not a real hash. The real pins are in actions/install-tool/tools.txt.
+
+gitleaks 8.0.0 linux-x86_64 1111111111111111111111111111111111111111111111111111111111111111 https://github.com/gitleaks/gitleaks/releases/download/v8.0.0/gitleaks_8.0.0_linux_x64.tar.gz

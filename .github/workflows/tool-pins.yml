@@ -1,0 +1,53 @@
+name: tool-pins
+
+# A monthly check of the pins in actions/install-tool/tools.txt. Dependabot does not read that file, so a pin never
+# updates itself. This workflow compares the version of each pin with the latest release of the tool on GitHub.
+# When a pin is behind, it opens ONE issue, or comments on the open one. It never changes a pin: a person changes the
+# version, the url and the hash together, and checks the hash. The README section "Scheduled checks" explains the check.
+#
+# The issue is in this repository, like the issue of the dependency audit.
+on:
+  schedule:
+    # The first day of the month, 05:41 UTC.
+    - cron: '41 5 1 * *'
+  workflow_dispatch:
+    inputs:
+      pins-file:
+        description: The pin file to check, as a path in this repository. The default is the real file. A test uses another file.
+        type: string
+        required: false
+        default: actions/install-tool/tools.txt
+      dry-run:
+        description: Write nothing. Print the issue or the comment that the run would write.
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+# Two runs at the same time could each open an issue. A running check is never cancelled.
+concurrency:
+  group: tool-pins
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: compare the pins with the latest releases and keep the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PINS_FILE: ${{ inputs.pins-file || 'actions/install-tool/tools.txt' }}
+          DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node actions/tool-pins/cli.mjs run

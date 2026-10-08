@@ -51,6 +51,9 @@ jobs:
       # This check reads the clock, so it fails on its own when a date passes. Renew the entry or remove it.
       - name: check the list of accepted advisories
         run: node actions/accepted-advisories/cli.mjs check
+      # The scheduled checks: the shared issue logic, the dependency audit and the tool pins. The tests use fakes. They need no network.
+      - name: test the scheduled checks
+        run: node --test actions/tracking-issue/lib.test.mjs actions/dependency-audit/lib.test.mjs actions/dependency-audit/cli.test.mjs actions/tool-pins/lib.test.mjs actions/tool-pins/cli.test.mjs
       - name: test the secret-scan script
         env:
           REQUIRE_GITLEAKS: '1'
