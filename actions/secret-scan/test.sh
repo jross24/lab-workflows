@@ -204,7 +204,7 @@ else
   contains 'a secret that only a merge commit adds is found' 'exit=1' "$out"
 
   # the arguments
-  out="$(cd "$repo" && bash "$here/scan.sh" 2>&1 || true)"
+  out="$(cd "$repo"; bash "$here/scan.sh" 2>&1)" || true
   contains 'no arguments show the usage' 'usage' "$out"
   out="$(scan 'main' "$head_clean")"
   contains 'a branch name instead of a commit id is refused' 'exit=2' "$out"
