@@ -54,9 +54,9 @@ jobs:
           persist-credentials: false
       # The file pipeline.json names the service and its providers. A bad file stops the release before it makes a tag.
       - id: pipeline
-        uses: jross24/lab-workflows/actions/pipeline-info@main
+        uses: jross24/lab-workflows/actions/pipeline-info@preflight
       - id: next
-        uses: jross24/lab-workflows/actions/next-version@main
+        uses: jross24/lab-workflows/actions/next-version@preflight
       - name: create the tag on the released commit
         if: steps.next.outputs.exists != 'true'
         env:
@@ -141,7 +141,7 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
-      - uses: jross24/lab-workflows/actions/lock-acquire@main
+      - uses: jross24/lab-workflows/actions/lock-acquire@preflight
 
   # The time budget of the lock. The lock ends 40 minutes after lock-test took it. The longest time that
   # a release can hold Test is: deploy-test 15 minutes (the limit of this job), plus the suite 12 minutes
@@ -178,15 +178,15 @@ jobs:
       # After a re-run it takes the lock again if Test is free. It does not wait. If another run holds the lock,
       # the step fails and tells the person to run all jobs again, so that lock-test queues for the lock.
       - name: make sure this run holds the lock
-        uses: jross24/lab-workflows/actions/lock-acquire@main
+        uses: jross24/lab-workflows/actions/lock-acquire@preflight
         with:
           max-wait-minutes: 0
           fail-hint: 'If this is a re-run of failed jobs, the lock was released in the first attempt and another run holds it now. Run all jobs again, so that lock-test queues for the lock.'
-      - uses: jross24/lab-workflows/actions/preflight@main
+      - uses: jross24/lab-workflows/actions/preflight@preflight
         with:
           environment: test
           version: ${{ needs.version.outputs.version }}
-      - uses: jross24/lab-workflows/actions/deploy@main
+      - uses: jross24/lab-workflows/actions/deploy@preflight
         with:
           assembly: cdk-out-${{ needs.version.outputs.tag }}.zip
           digest: ${{ needs.build.outputs.digest }}
@@ -261,7 +261,7 @@ jobs:
       json: ${{ steps.record.outputs.json }}
     steps:
       - id: record
-        uses: jross24/lab-workflows/actions/tested-with@main
+        uses: jross24/lab-workflows/actions/tested-with@preflight
         with:
           tag: ${{ needs.version.outputs.tag }}
           version: ${{ needs.version.outputs.version }}
@@ -309,7 +309,7 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
-      - uses: jross24/lab-workflows/actions/lock-release@main
+      - uses: jross24/lab-workflows/actions/lock-release@preflight
 
   # Staging needs a passed E2E suite and a recorded tested set. With run-e2e set to false, a skipped suite is
   # accepted, but only when Test was deployed. A deploy-test that failed also skips the suite, and that must stop the release.
@@ -348,12 +348,12 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
-      - uses: jross24/lab-workflows/actions/preflight@main
+      - uses: jross24/lab-workflows/actions/preflight@preflight
         with:
           environment: staging
           version: ${{ needs.version.outputs.version }}
           tested-with: ${{ needs.tested-set.outputs.json }}
-      - uses: jross24/lab-workflows/actions/deploy@main
+      - uses: jross24/lab-workflows/actions/deploy@preflight
         with:
           assembly: cdk-out-${{ needs.version.outputs.tag }}.zip
           digest: ${{ needs.build.outputs.digest }}
@@ -380,7 +380,7 @@ jobs:
       actions: write
       contents: read
     steps:
-      - uses: jross24/lab-workflows/actions/supersede@main
+      - uses: jross24/lab-workflows/actions/supersede@preflight
         continue-on-error: true
         with:
           tag: ${{ needs.version.outputs.tag }}
@@ -427,12 +427,12 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
       - id: preflight
-        uses: jross24/lab-workflows/actions/preflight@main
+        uses: jross24/lab-workflows/actions/preflight@preflight
         with:
           environment: production
           version: ${{ needs.version.outputs.version }}
           tested-with: ${{ needs.tested-set.outputs.json }}
-      - uses: jross24/lab-workflows/actions/deploy@main
+      - uses: jross24/lab-workflows/actions/deploy@preflight
         with:
           assembly: cdk-out-${{ needs.version.outputs.tag }}.zip
           digest: ${{ needs.build.outputs.digest }}
@@ -449,7 +449,7 @@ jobs:
           fault-drill: ${{ vars.E2E_FAULT_DRILL }}
       - name: propose the way back after a failed smoke check
         if: ${{ failure() && steps.smoke.outcome == 'failure' }}
-        uses: jross24/lab-workflows/actions/propose-rollback@main
+        uses: jross24/lab-workflows/actions/propose-rollback@preflight
         with:
           service: ${{ needs.version.outputs.service }}
           version: ${{ needs.version.outputs.version }}
