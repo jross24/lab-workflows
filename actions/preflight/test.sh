@@ -557,15 +557,45 @@ setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.3.1'
 PF_TESTED_WITH="$(tested_json 0.4.0 0.3.1 0.3.1 0.5.2)" run_check
 check_equal 'a neighbour that is older than tested stops the release' '1' "$status"
 contains 'the message names the missing release' 'core 0.5.2 was in the set that the E2E suite tested with web 0.4.0 (release v0.4.0 of web), but production runs core 0.5.1.' "$output"
-contains 'the message tells where to release it' 'Release core 0.5.2 to production first (repository lab-svc-core)' "$output"
-contains 'the message names the escape in pipeline.json' 'add a range for core to pipeline.json' "$output"
+contains 'the message tells where the neighbour lives' 'The repository of core is lab-svc-core.' "$output"
+contains 'the message gives the cure: promote, then re-run' 'Promote core 0.5.2 to production first, then choose Re-run failed jobs on this run.' "$output"
+# shellcheck disable=SC2016 # the backticks are text of the message
+contains 'the message names the escape in pipeline.json' 'Or add a `compatible` range for core to pipeline.json if the older version is known to work.' "$output"
+lacks 'the message no longer says run this job again' 'run this job again' "$output"
 contains 'the summary row says missing release' '| tested together | core | 0.5.2 | 0.5.1 | FAILED: missing release |' "$(cat "$GITHUB_STEP_SUMMARY")"
+contains 'the summary has a section with the fix' '#### What to do' "$(cat "$GITHUB_STEP_SUMMARY")"
+# shellcheck disable=SC2016 # the backticks are text of the message
+contains 'the summary names the neighbour, both versions and the cure' '- core 0.5.2 was in the set that the E2E suite tested with web 0.4.0 (release v0.4.0 of web), but production runs core 0.5.1. The repository of core is lab-svc-core. Promote core 0.5.2 to production first, then choose Re-run failed jobs on this run. Or add a `compatible` range for core to pipeline.json if the older version is known to work.' "$(cat "$GITHUB_STEP_SUMMARY")"
 check_equal 'only the core row failed' '1' "$(grep -c '::error title=Missing release' <<< "$output" || true)"
+
+setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.3.1'
+PF_ENVIRONMENT=staging PF_TESTED_WITH="$(tested_json 0.4.0 0.3.1 0.3.1 0.5.2)" run_check
+check_equal 'an older neighbour stops the release in staging too' '1' "$status"
+contains 'the cure names the environment of the run' 'Promote core 0.5.2 to staging first, then choose Re-run failed jobs on this run.' "$output"
+contains 'the facts name the environment of the run' 'but staging runs core 0.5.1.' "$output"
+
+# Two neighbours that are older give two messages and two entries in the summary: each one names its own version.
+# The file has no ranges here, because a range of requires also accepts an older neighbour.
+write_pipeline '{"service":"web"}'
+setup 'core 0.5.1' 'catalogue 0.3.0' 'account 0.3.1' 'web 0.3.1'
+PF_TESTED_WITH="$(tested_json 0.4.0 0.3.1 0.3.1 0.5.2)" run_check
+check_equal 'two older neighbours stop the release' '1' "$status"
+check_equal 'two older neighbours give two error lines' '2' "$(grep -c '^::error title=Missing release::' <<< "$output" || true)"
+contains 'the first message names catalogue' 'Promote catalogue 0.3.1 to production first, then choose Re-run failed jobs on this run.' "$output"
+contains 'the second message names core' 'Promote core 0.5.2 to production first, then choose Re-run failed jobs on this run.' "$output"
+check_equal 'the summary has one section with the fix' '1' "$(grep -c '^#### What to do' "$GITHUB_STEP_SUMMARY" || true)"
+check_equal 'the summary has one entry for each neighbour' '2' "$(grep -c '^- .* Promote .* to production first' "$GITHUB_STEP_SUMMARY" || true)"
+write_pipeline '{"service":"web","requires":{"catalogue":">=0.3.0","account":">=0.3.0"}}'
+
+setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.3.1'
+PF_TESTED_WITH="$(tested_json 0.4.0 0.3.1 0.3.1 0.5.1)" run_check
+lacks 'a passing check has no section with the fix' 'What to do' "$(cat "$GITHUB_STEP_SUMMARY")"
 
 setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.3.1'
 write_pipeline '{"service":"web","requires":{"catalogue":">=0.3.0","account":">=0.3.0","core":">=0.5.0"}}'
 PF_TESTED_WITH="$(tested_json 0.4.0 0.3.1 0.3.1 0.5.2)" run_check
 check_equal 'an older neighbour inside the range of requires passes' '0' "$status"
+lacks 'a neighbour that a range accepts gives no section with the fix' 'What to do' "$(cat "$GITHUB_STEP_SUMMARY")"
 contains 'the summary says that pipeline.json accepts it' 'ok: older, but pipeline.json accepts >=0.5.0' "$(cat "$GITHUB_STEP_SUMMARY")"
 
 write_pipeline '{"service":"web","requires":{"catalogue":">=0.3.0","account":">=0.3.0"},"compatible":{"core":">=0.5.0 <1.0.0"}}'
@@ -592,6 +622,7 @@ setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.3.1'
 PF_TESTED_WITH="$(tested_json 0.4.0 0.3.1 0.3.1 0.5.2)" PF_MODE=redeploy run_check
 check_equal 'in a redeploy an older neighbour does not stop' '0' "$status"
 contains 'in a redeploy an older neighbour is a warning row' 'warning: older than tested (a redeploy does not stop)' "$(cat "$GITHUB_STEP_SUMMARY")"
+lacks 'in a redeploy an older neighbour gives no section with the fix' 'What to do' "$(cat "$GITHUB_STEP_SUMMARY")"
 
 setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.3.1'
 run_check
@@ -654,7 +685,7 @@ flags_older_record="$output"
 PF_VERSION=0.1.0 PF_TESTED_WITH="$flags_older_record" run_check
 check_equal 'an older neighbour stops a flags release' '1' "$status"
 contains 'the message for an older neighbour is the same' '::error title=Missing release::core 0.5.2 was in the set that the E2E suite tested with flags 0.1.0 (release v0.4.0 of flags), but production runs core 0.5.1.' "$output"
-contains 'the message tells where to release the neighbour' 'Release core 0.5.2 to production first (repository lab-svc-core)' "$output"
+contains 'the message gives the cure for flags too' 'Promote core 0.5.2 to production first, then choose Re-run failed jobs on this run.' "$output"
 
 # A service may list flags as a provider. The message names the repository lab-flags.
 write_pipeline '{"service":"catalogue","requires":{"core":">=0.5.0","flags":">=0.1.0"}}'
