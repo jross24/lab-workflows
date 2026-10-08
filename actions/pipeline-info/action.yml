@@ -1,0 +1,28 @@
+name: pipeline info
+description: Reads pipeline.json of the service repository, checks it, and gives the name of the service.
+
+# The caller must check out the repository first. The README describes the file.
+inputs:
+  file:
+    description: The path of the file, relative to the workspace.
+    default: pipeline.json
+
+outputs:
+  service:
+    description: The name of the service, for example catalogue.
+    value: ${{ steps.read.outputs.service }}
+
+runs:
+  using: composite
+  steps:
+    - id: read
+      shell: bash
+      env:
+        PF_PIPELINE_FILE: ${{ inputs.file }}
+      run: |
+        if ! service="$(bash "$GITHUB_ACTION_PATH/../preflight/preflight.sh" validate)"; then
+          # The script prints the error annotations to its output. Show them.
+          echo "$service"
+          exit 1
+        fi
+        echo "service=${service}" >> "$GITHUB_OUTPUT"

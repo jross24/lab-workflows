@@ -1,0 +1,63 @@
+name: tested with
+description: Makes the record of the tested versions from the output of the E2E run. It fails if the record is not complete or if the suite did not test this release.
+
+inputs:
+  tag:
+    description: The tag of the release, for example v0.4.0.
+    required: true
+  version:
+    description: The version of the release, for example 0.4.0.
+    required: true
+  service:
+    description: The name of the service that the release changed, for example web.
+    required: true
+  commit:
+    description: The commit of the release.
+    default: ''
+  e2e-commit:
+    description: The commit of lab-e2e that the run used.
+    default: ''
+  web:
+    description: The version of web that the run tested.
+    default: ''
+  catalogue:
+    description: The version of catalogue that the run tested.
+    default: ''
+  account:
+    description: The version of account that the run tested.
+    default: ''
+  core:
+    description: The version of core that the run tested.
+    default: ''
+  file:
+    description: The path of the JSON file that the action writes.
+    default: tested-with.json
+
+outputs:
+  json:
+    description: The record as one line of JSON.
+    value: ${{ steps.record.outputs.json }}
+  file:
+    description: The path of the file that holds the record.
+    value: ${{ inputs.file }}
+
+runs:
+  using: composite
+  steps:
+    - id: record
+      shell: bash
+      env:
+        PF_TAG: ${{ inputs.tag }}
+        PF_VERSION: ${{ inputs.version }}
+        PF_SERVICE: ${{ inputs.service }}
+        PF_COMMIT: ${{ inputs.commit }}
+        PF_E2E_COMMIT: ${{ inputs.e2e-commit }}
+        PF_WEB: ${{ inputs.web }}
+        PF_CATALOGUE: ${{ inputs.catalogue }}
+        PF_ACCOUNT: ${{ inputs.account }}
+        PF_CORE: ${{ inputs.core }}
+        FILE: ${{ inputs.file }}
+      run: |
+        json="$(bash "$GITHUB_ACTION_PATH/../preflight/preflight.sh" tested-with)"
+        printf '%s\n' "$json" > "$FILE"
+        echo "json=${json}" >> "$GITHUB_OUTPUT"

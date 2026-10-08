@@ -3,6 +3,11 @@ name: redeploy
 # The rollback path. It deploys the cloud assembly of an old release again. It does not build.
 # The caller must give these permissions: contents: read, id-token: write.
 # The caller must pass its secrets with "secrets: inherit". The README gives the reason.
+#
+# A redeploy to Test takes the Test lock, like a release. A redeploy to Staging or Production waits for the job
+# that deploys to that environment in the same repository: both use the concurrency group deploy-<environment>.
+# The checks before the deployment run in the mode redeploy: they stop a redeploy only when a provider is missing or too old.
+# A redeploy may go back to an older version, and it does not stop for the tested set. The README explains why.
 on:
   workflow_call:
     inputs:
@@ -51,12 +56,38 @@ jobs:
             echo "stage=${stage}"
           } >> "$GITHUB_OUTPUT"
 
-  redeploy:
+  # Takes the lock of Test, like lock-test in the release. It runs only for Test.
+  # A rollback to Test is not urgent, so it waits for the lock, 20 minutes at most. Then the job fails, and the person starts it again.
+  # The redeploy job must not run without the lock, because a release could be in the middle of its E2E suite.
+  lock:
     needs: [check]
+    if: ${{ inputs.environment == 'test' }}
+    runs-on: ubuntu-latest
+    environment: test
+    timeout-minutes: 25
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - uses: jross24/lab-workflows/actions/lock-acquire@main
+
+  # The limit is the limit of the deployment plus 10 minutes for the checks and the smoke subset.
+  # The deployment to production moves the traffic in steps, like a release, and needs 30 minutes at most.
+  # Test and Staging need 15 minutes. A redeploy to Test is part of the time budget of the lock: 15 minutes, like deploy-test.
+  redeploy:
+    needs: [check, lock]
+    if: ${{ !cancelled() && needs.check.result == 'success' && (needs.lock.result == 'success' || needs.lock.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
-    # A redeploy to production moves the traffic in steps, like a release. The limit is the same as for deploy-production.
-    timeout-minutes: 30
+    timeout-minutes: ${{ inputs.environment == 'production' && 40 || inputs.environment == 'staging' && 25 || 15 }}
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
     permissions:
       id-token: write
       contents: read
@@ -69,21 +100,83 @@ jobs:
           ref: refs/tags/${{ needs.check.outputs.tag }}
           persist-credentials: false
       - id: download
-        name: download the cloud assembly of the release
+        name: download the cloud assembly and the tested set of the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern "cdk-out-${TAG}.zip" --pattern "cdk-out-${TAG}.zip.sha256"
           echo "digest=$(cut -d ' ' -f 1 "cdk-out-${TAG}.zip.sha256")" >> "$GITHUB_OUTPUT"
+          # A release from before the tested set has no such file. Then the redeploy has no record to compare.
+          if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern tested-with.json; then
+            echo "tested-with=$(jq -c . tested-with.json)" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::The release $TAG has no tested-with.json. It is older than the record of tested versions."
+          fi
+      # A tag from before the checks has no pipeline.json. The checks then use the file of the default branch.
+      - id: pipeline
+        name: find pipeline.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ! -f pipeline.json ]]; then
+            echo "::notice::The tag $TAG has no pipeline.json. The checks use the pipeline.json of the default branch."
+            gh api -H 'Accept: application/vnd.github.raw' "repos/${GITHUB_REPOSITORY}/contents/pipeline.json" > pipeline.json
+          fi
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
+      # After "Re-run failed jobs" the job lock does not run again. See the step with the same name in release.yml.
+      - name: make sure this run holds the lock
+        if: ${{ inputs.environment == 'test' }}
+        uses: jross24/lab-workflows/actions/lock-acquire@main
+        with:
+          max-wait-minutes: 0
+          fail-hint: 'If this is a re-run of failed jobs, the lock was released in the first attempt and another run holds it now. Wait until that run has ended. Then re-run the failed jobs again.'
+      - uses: jross24/lab-workflows/actions/preflight@main
+        with:
+          environment: ${{ inputs.environment }}
+          version: ${{ needs.check.outputs.version }}
+          mode: redeploy
+          tested-with: ${{ steps.download.outputs.tested-with }}
       - uses: jross24/lab-workflows/actions/deploy@main
         with:
           assembly: cdk-out-${{ needs.check.outputs.tag }}.zip
           digest: ${{ steps.download.outputs.digest }}
           stage: ${{ needs.check.outputs.stage }}
           version: ${{ needs.check.outputs.version }}
+      - id: info
+        name: read the name of the service
+        if: ${{ inputs.environment != 'test' }}
+        uses: jross24/lab-workflows/actions/pipeline-info@main
+      # The smoke subset checks that the environment reports the version that the redeploy put there. Test has no smoke
+      # check in a redeploy: it has the full suite in a release.
+      - name: smoke check
+        if: ${{ inputs.environment != 'test' }}
+        uses: jross24/lab-e2e/actions/suite@main
+        with:
+          environment: ${{ inputs.environment }}
+          suite: smoke
+          service: ${{ steps.info.outputs.service }}
+          version: ${{ needs.check.outputs.version }}
+          fault-drill: ${{ vars.E2E_FAULT_DRILL }}
+
+  # Releases the lock of Test, if the job lock took it. It runs after a pass, a failure and a cancel.
+  unlock:
+    needs: [check, lock, redeploy]
+    if: ${{ always() && needs.lock.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    environment: test
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - uses: jross24/lab-workflows/actions/lock-release@main

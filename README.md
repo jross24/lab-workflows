@@ -3,13 +3,19 @@
 This repository holds the shared pipeline of the pipeline lab.
 A service repository does not copy the pipeline. It calls the workflows in this repository.
 
-The pipeline has three reusable workflows and several composite actions.
+The pipeline has reusable workflows and several composite actions.
 
 | File | What it does |
 | --- | --- |
 | `.github/workflows/pr.yml` | Checks a pull request: lint, typecheck, tests, `cdk synth`, a dependency check, a secret scan, `actionlint` and the `cdk diff` comment. Only the diff job has AWS access, and it can only read. |
-| `.github/workflows/release.yml` | Releases a push to `main`: version tag, one build, then Test (with the lock and the E2E gate), Staging and Production. |
-| `.github/workflows/redeploy.yml` | Deploys an old release again. This is the rollback path. |
+| `.github/workflows/release.yml` | Releases a push to `main`: version tag, one build, then Test (with the lock and the E2E gate), Staging and Production. Each environment has checks before the deployment and a smoke check after it. |
+| `.github/workflows/redeploy.yml` | Deploys an old release again. This is the rollback path. It takes the Test lock for Test. |
+| `.github/workflows/check.yml` | A dry run of the checks before a deployment. It deploys nothing. |
+| `actions/pipeline-info` | Reads `pipeline.json` of the service repository and gives the name of the service. |
+| `actions/preflight` | The checks before a deployment: the providers, the tested set and "no step back". The script and its tests are in the same folder. |
+| `actions/tested-with` | Makes the record of the versions that passed in Test (`tested-with.json`). |
+| `actions/supersede` | Cancels the older releases that wait for the production reviewer. |
+| `actions/propose-rollback` | After a failed smoke check in Production, it starts the redeploy of the earlier version. That run waits for the reviewer. |
 | `actions/next-version` | Works out the next version from the commit titles. |
 | `actions/deploy` | Deploys one CDK stage from the cloud assembly of the build job. |
 | `actions/lock-acquire` | Takes the lock of the shared Test environment. It waits when another release holds the lock. |
@@ -49,24 +55,33 @@ You can also compare the result in AWS. The `CodeSha256` of the Lambda function 
 
 `release.yml` runs these jobs in this order:
 
-1. `version` works out the next version and creates the tag on the released commit.
+1. `version` reads `pipeline.json`, works out the next version and creates the tag on the released commit.
 2. `build` runs `npm ci`, lint, typecheck, the tests and one `cdk synth -c version=<version>`. It uploads the zip as a workflow artefact. It also attaches the zip to a GitHub release with the name of the tag.
 3. `lock-test` takes the lock of the Test environment. It waits when another release holds the lock.
-4. `deploy-test` deploys the stage `Test` in the GitHub environment `test`.
+4. `deploy-test` makes sure that this run holds the lock, runs the checks before a deployment, and deploys the stage `Test` in the GitHub environment `test`.
 5. `e2e` runs the end-to-end suite of [lab-e2e](https://github.com/jross24/lab-e2e) against Test.
-6. `unlock-test` releases the lock. It runs after a pass, after a failure and after a cancel.
-7. `deploy-staging` deploys the stage `Staging` in the GitHub environment `staging`. It starts only if `e2e` passed. With `run-e2e: false` it starts after `deploy-test` passed.
-8. `deploy-production` deploys the stage `Production` in the GitHub environment `production`.
+6. `tested-set` records the four versions that the suite tested. It attaches them to the GitHub release as `tested-with.json`.
+7. `unlock-test` releases the lock. It runs after a pass, after a failure and after a cancel.
+8. `deploy-staging` runs the checks, deploys the stage `Staging` in the GitHub environment `staging`, and runs the smoke subset of the E2E suite. It starts only if `e2e` and `tested-set` passed. With `run-e2e: false` it starts after `deploy-test` passed.
+9. `supersede` cancels the older releases of this repository that still wait for the production reviewer.
+10. `deploy-production` runs the checks, deploys the stage `Production` in the GitHub environment `production`, and runs the smoke subset. If the smoke subset fails, it proposes the way back.
 
 `e2e-summary` runs when `e2e` ran. It writes the versions that the E2E run tested into the summary of the release. With `run-e2e: false` it does not run.
 
 ```
-version -> build -> lock-test -> deploy-test -> e2e -> unlock-test
-                                                  \-> deploy-staging -> deploy-production
+version -> build -> lock-test -> deploy-test -> e2e -> tested-set --+
+                                        \          \-> unlock-test  |
+                                         \-------------------------\|
+                                                                    v
+                                     deploy-staging -> supersede -> deploy-production
+                                     (checks, deploy, smoke)        (checks, deploy, smoke)
 ```
 
 Each deploy job starts only after the jobs before it passed. With `run-e2e: false`, `deploy-staging` accepts the skipped `e2e` job, but only after `deploy-test` passed.
 If the `production` environment has a required reviewer, `deploy-production` waits until that person approves it.
+
+The jobs are not one queue. Each job that changes an environment has its own concurrency group. The section "Releases in order" explains the groups.
+The caller must not set a `concurrency` group for the whole run.
 
 ### How the version is chosen
 
@@ -86,30 +101,38 @@ Each job that waits for something outside the runner has a `timeout-minutes` lim
 
 | Job | Limit | Why |
 | --- | --- | --- |
+| `version` | 10 minutes | A job of a few seconds. |
+| `build` | 20 minutes | `npm ci`, the tests and `cdk synth` need a few minutes. |
 | `lock-test` | 25 minutes | The wait for the Test lock is 20 minutes at most. |
-| `deploy-test` | 15 minutes | Part of the time budget of the lock (see "The time budget of the lock"). It is 15 and not 10 because the first deployment of CloudWatch Transaction Search in an account waits about 6 minutes for the setting. |
+| `deploy-test` | 15 minutes | Part of the time budget of the lock (see "The time budget of the lock"). It is 15 and not 10 because the first deployment of CloudWatch Transaction Search in an account waits about 6 minutes for the setting. The checks and the step that makes sure the run holds the lock take a few seconds and are inside the 15. |
 | `unlock-test` | 5 minutes | A short job. GitHub ends a cancelled job after 5 minutes. |
-| `deploy-staging` | 15 minutes | Like Test, plus room. |
-| `deploy-production` | 30 minutes | See below. |
-| `redeploy` (in `redeploy.yml`) | 30 minutes | It can deploy to production. |
+| `tested-set` | 5 minutes | A job of a few seconds. It does not hold the lock. |
+| `e2e-summary` | 5 minutes | A job of a few seconds. |
+| `deploy-staging` | 25 minutes | 15 for the deployment, like Test, and 10 for the checks and the smoke subset. The smoke subset needs about 2 minutes. |
+| `supersede` | 5 minutes | A job of a few seconds. |
+| `deploy-production` | 40 minutes | 30 for the deployment (see below) and 10 for the checks and the smoke subset. |
+| `redeploy` (in `redeploy.yml`) | 15, 25 or 40 minutes | For Test, Staging or Production. The same limits as the release jobs. |
+| `lock` (in `redeploy.yml`) | 25 minutes | The wait for the Test lock is 20 minutes at most. |
 
 A service can release with CodeDeploy: the traffic of a Lambda alias moves to the new version in steps, and an alarm rolls it back.
 CloudFormation waits for the CodeDeploy deployment, so the job `cdk deploy` waits too. A canary of "10 percent for 5 minutes" alone takes 5 minutes.
-The limit of `deploy-production` is 30 minutes. It leaves room for the stack update, for the canary and for a rollback of the traffic and of the stack.
+The deployment part of the limit of `deploy-production` is 30 minutes. It leaves room for the stack update, for the canary and for a rollback of the traffic and of the stack.
 A job that waits for a required reviewer has not started, so that wait does not count against the limit.
+A composite action cannot set a limit for its own steps. So the smoke subset has no limit of its own. Its tests have limits (30 seconds for a test, 90 seconds for the warm-up), and the limit of the job covers the rest.
 
-The limit of `deploy-test` did not change. The stage Test and the stage Staging move the traffic all at once, which adds a short time.
-The lock budget is therefore the same as before.
+The part of `deploy-test` that holds the lock did not change. The lock budget is therefore the same as before.
 
 ## The end-to-end gate
 
 After `deploy-test`, the job `e2e` calls the workflow `run.yml` of [lab-e2e](https://github.com/jross24/lab-e2e) for the environment `test`.
-The suite loads the page of web and calls the public APIs. It checks that the versions on the page equal the versions that the services report.
+It passes the service and the version of the release. The suite loads the page of web and calls the public APIs. It checks that the versions on the page equal the versions that the services report.
+It also checks that Test reports the version of this release (the release test).
 If the suite fails, `deploy-staging` does not start, so the release stops.
 
 `e2e-summary` writes the exact versions that the suite tested into the summary of the release.
 The summary of the E2E job itself also lists them, with the commit of lab-e2e.
-When the suite fails, the called workflow may give no outputs to `e2e-summary`. The lab has not checked this, and the GitHub documentation does not say. In that case `e2e-summary` writes "not recorded". The summary of the E2E job still lists the versions.
+When the suite fails, the called workflow still gives its outputs to `e2e-summary`. The lab checked this on 2026-10-08 with a test workflow, and in the failed drill run that the section "What is proven" lists.
+`e2e-summary` writes "not recorded" for an empty output anyway, for example when the suite never ran.
 
 ### The input `run-e2e`
 
@@ -153,7 +176,7 @@ lab-web deploys. Then lab-svc-catalogue deploys over it. The suite of lab-web no
 If the suite fails, nobody can tell which change broke it.
 
 So the releases must use Test one at a time. A release holds the lock from before `deploy-test` until after the E2E suite.
-The lock covers the path of `release.yml` only. `redeploy.yml` can also deploy to Test, and it takes no lock. See "What the lock does not solve".
+A release takes the lock in `lock-test` and gives it back in `unlock-test`. Two other users of Test take the same lock: `redeploy.yml` for a redeploy to Test, and the runs that lab-e2e starts itself. See "Who takes the lock".
 
 ### Why a concurrency group does not work
 
@@ -192,7 +215,7 @@ The code compares `expiresAt` with the clock itself. It does not wait for the TT
 If another run holds the lock, the action prints who holds it, a link to that run and the time that is left. It waits 15 seconds and tries again.
 After 20 minutes of waiting it fails with a clear message.
 
-**Release** (`actions/lock-release`) deletes the item with the condition `holder = <me>`.
+**Release** (`actions/lock-release`) deletes the item with the condition `begins_with(holder, <run prefix>)`. Any attempt of the same run can delete the lock of the run. This lets attempt 2 release a lock that attempt 1 took, when the release job of attempt 1 failed.
 If the item is gone, or another run holds it, the action prints a warning and succeeds. A cleanup step must not fail a release.
 
 | Input | Default | Meaning |
@@ -243,31 +266,42 @@ The code is the bash script `actions/lock/lock.sh`. Both actions call it. Run it
 | `deploy-test` fails | `e2e` is skipped. `unlock-test` still runs and releases the lock. `deploy-staging` does not start. |
 | The E2E suite fails | `unlock-test` runs and releases the lock. `deploy-staging` does not start. |
 | `lock-test` cannot get the lock in 20 minutes | The job fails. `deploy-test` does not run. `unlock-test` runs, finds that another run holds the lock, and warns. |
-| Someone cancels the run | The expression `always()` "causes the step to always execute, and returns true, even when canceled". `unlock-test` has the condition `always() && needs.lock-test.result != 'skipped'`, so it still runs after a cancel, if the job `lock-test` ran. The cancel reference says that GitHub ends all jobs that still run 5 minutes after the cancel, so the job must be short. It is short. That page describes jobs that already run. It does not describe a job that still waits for its `needs`. The lab has not tested this case. |
+| Someone cancels the run | The expression `always()` "causes the step to always execute, and returns true, even when canceled". `unlock-test` has the condition `always() && needs.lock-test.result != 'skipped'`, so it still runs after a cancel, if the job `lock-test` ran. It waits for the job that runs (for example `e2e`) to end first, because it needs it. The cancel reference says that GitHub ends all jobs that still run 5 minutes after the cancel. |
 | A runner dies, or GitHub force-cancels the run | `unlock-test` may not run. The lock ends by itself after 40 minutes. This is the safety valve. |
 | `deploy-test` hangs | The job limit is 15 minutes, less than the 40 minutes of the lock. So the job ends before the lock expires. |
 | The lock expires while a release still uses Test | Another release can take the lock. Both then use Test. The time budget above (29 minutes at most for 40 minutes of lock) makes this unlikely. |
-| A person starts "Re-run failed jobs" after a failed `deploy-test` or a failed E2E suite | The re-run uses Test without the lock. See the limits below. |
+| A person starts "Re-run failed jobs" after a failed `deploy-test` or a failed E2E suite | See "A re-run of failed jobs" below. The re-run takes the lock again, or it stops with an instruction. |
+| A redeploy to Test, or a run of lab-e2e, meets a release | It waits for the lock. See below. |
+| `lock-test` is cancelled while it waits for the group, because a newer release replaced its run | `unlock-test` still starts, because the job did not skip. It finds that another run holds the lock, or that no lock exists, and warns. It deletes only a lock of its own run. |
 
-Cancel and force-cancel are from the documentation. The lab has not tested them.
+### Who takes the lock
+
+| User | How | When the lock is taken by another run |
+| --- | --- | --- |
+| A release | `lock-test` before `deploy-test`, `unlock-test` after the suite | It waits up to 20 minutes. Then the job fails and someone starts the release again. |
+| A redeploy to Test (`redeploy.yml`) | The job `lock` before `redeploy`, the job `unlock` after it | It waits up to 20 minutes. Then it fails. A rollback to Test is not urgent. A redeploy to Staging or Production takes no lock. |
+| A run that lab-e2e starts itself (push to `main`, schedule, manual run) | The job `lock` of `run.yml`, the job `unlock` after the suite | It waits up to 20 minutes, then **skips** the suite with a notice. It does not fail. A busy Test environment says nothing about the code, and a red nightly run teaches people to ignore red runs. The input `lock-wait-minutes` of a manual run makes the wait shorter. |
+
+The lock is one item. A holder is `<repository>#<run id>#<attempt>`. GitHub gives a nested workflow the `github` context of the caller. So inside a release, the E2E suite has the same holder as `lock-test`. Taking the lock again is then a no-op that starts the expiry again.
+
+### A re-run of failed jobs
+
+"Re-run failed jobs" runs again the failed jobs and the jobs that need them. It does not run `lock-test` again, because that job passed. But `unlock-test` of the first attempt released the lock.
+A re-run of `deploy-test` or `e2e` would then use Test without the lock. Two steps close this gap:
+
+- `deploy-test` and the job `suite` of `run.yml` start with the step "make sure this run holds the lock". It calls `lock-acquire` with `max-wait-minutes: 0`.
+- In the first attempt the step is a no-op: the run holds the lock, and the call only starts the expiry again.
+- After a re-run the lock is gone. If Test is free, the step takes the lock again. `unlock-test` needs `e2e`, so it runs again and releases the lock at the end.
+- If another run holds the lock, the step fails at once. It does not wait, because the job limits and the time budget of the lock count on a short job. The message says: wait until that run has ended, then re-run the failed jobs again.
+
+The same holds for `redeploy.yml`, with the job `lock`.
 
 ### What the lock does not solve
 
-**The set of versions that passed in Test can differ from the set in Staging and Production.**
-The E2E suite tests the versions that are in Test at that time, for example web 0.2.0 with catalogue 0.1.0.
-Each service repository promotes by itself. Staging may hold catalogue 0.1.1 when web 0.2.0 arrives there. Production may hold yet another set.
-So "the suite passed in Test" does not mean "this set of versions works in Staging or in Production".
-The lock only makes the result in Test attributable. It does not pin the set.
-To close this gap, a team must promote a whole set of versions, or use contract tests that check each pair of services on its own. See [lab-platform#21](https://github.com/jross24/lab-platform/issues/21).
-
-Other limits:
-
-- **The lock is not a queue.** Waiting releases poll. The release that polls first after the lock ends wins. There is no order and no fairness.
+- **The lock is not a queue.** Waiting releases poll. The release that polls first after the lock ends wins. There is no order and no fairness between repositories. Inside one repository, the group `release-test-queue` lets only one release poll at a time.
 - **The clock of the runner decides.** The expiry compares the clocks of different runners. GitHub synchronises them, and the margin is 11 minutes, so a few seconds of drift do not matter.
-- **A release that runs again with "Re-run failed jobs" does not take the lock again.** This holds after a failed `deploy-test` and after a failed E2E suite. The job `lock-test` passed, so GitHub does not run it again. `unlock-test` released the lock in the first attempt. The re-run of `deploy-test` or of `e2e` then changes or uses Test without the lock. See [lab-platform#19](https://github.com/jross24/lab-platform/issues/19).
-- **A redeploy to Test takes no lock.** `redeploy.yml` can deploy to `test`, for a rollback. It can change Test while a release holds the lock, and then the E2E suite of that release tests a different version. See [lab-platform#24](https://github.com/jross24/lab-platform/issues/24).
-- **A run that lab-e2e starts itself** (a push to its `main`, the nightly schedule or a manual run) does not take the lock. A release that deploys to Test at the same time can disturb it. See [lab-platform#19](https://github.com/jross24/lab-platform/issues/19).
-- **The lock covers Test only.** Staging and Production have no lock table.
+- **The lock covers Test only.** Staging and Production have no lock table. The concurrency groups of each repository order the deployments there, and the check "no step back" keeps an environment from going back. Two repositories can deploy to Staging at the same time, because they deploy different stacks.
+- **A set of versions that passed in Test can differ from the set in Staging and Production.** The lock does not pin it. The tested set and its check handle this. See "The tested set".
 
 ### The trade-off
 
@@ -281,61 +315,61 @@ The alternative is a Test environment for each team or for each change. That cos
 
 ## What is proven and what is not
 
-| Claim | State |
+The column "How" says how the lab proved a claim:
+
+- **Unit test**: a bash test with a fake `aws` or `gh` command and a fake clock. CI runs it. It calls no AWS API.
+- **Experiment**: a small scratch workflow in this repository, run on 2026-10-08 and then deleted.
+- **Real run**: a release or a redeploy in the lab accounts. The links go to the runs. All times are UTC, on 2026-10-08.
+
+| Claim | How | Result |
+| --- | --- | --- |
+| Version ranges, the comparison of versions (also `0.10.0` against `0.9.0` and leading zeros), the verdicts of the checks, the parsing of `pipeline.json` | Unit test (`actions/preflight/test.sh`) | Pass. |
+| The decision of `supersede` (which runs it cancels, which it leaves) and of `propose-rollback` | Unit test | Pass. |
+| The lock: acquire, wait, skip, `fresh`, release by any attempt of the run | Unit test (`actions/lock/test.sh`) | Pass. |
+| The conditional writes against the real DynamoDB table, and the lock between real runs | Real run | The lock was taken and released in every run below. The poller of the table (a read-only call) showed one holder at a time. |
+| The checks pass for a normal release, in Test, Staging and Production, and the tested set is recorded | Real run ([account 0.4.2](https://github.com/jross24/lab-svc-account/actions/runs/37758177862)) | The summary of each deploy job has the table of the checks. `tested-set` attached `tested-with.json` to the release. |
+| The version parameter shows the new version when the release is complete | Real run (production canary of account 0.4.2) | During the canary the stack was `UPDATE_IN_PROGRESS` and `/lab/account/version` still held `0.4.1`. At `UPDATE_COMPLETE` it held `0.4.2`. |
+| A provider requirement that cannot be met stops a deployment with a clear message (issue 16) | Real run, the dry run [check.yml](https://github.com/jross24/lab-svc-account/actions/runs/37770650320) with `requires={"core":">=9.9.9"}` against Staging | `account needs core >=9.9.9, but staging runs core 0.6.1, which is outside the range.` The job failed. Nothing was deployed, and `main` did not change. |
+| A neighbour that is older than the tested set stops a release (issue 21) | Real run ([account 0.4.8](https://github.com/jross24/lab-svc-account/actions/runs/37768086830), attempt 1) | web 0.4.2 was held at the production gate. The account release was tested next to it. Its production job failed with `Missing release` and did not deploy. |
+| The same release goes on when the missing release is in the environment (issue 21) | Real run (the same run, attempt 2) | After web 0.4.2 reached Production, "Re-run failed jobs" passed the check (`web 0.4.2 / 0.4.2 ok: the same version`) and deployed. |
+| A failed suite stops `deploy-staging` and the lock is released (issue 20) | Real run ([account 0.4.3](https://github.com/jross24/lab-svc-account/actions/runs/37761504619), the drill `full-test`) | The suite failed on purpose. `unlock-test` passed. `deploy-staging`, `supersede` and `deploy-production` were skipped. The lock was held from 10:09:33 to 10:12:29 and then gone. |
+| A failed called workflow gives its outputs to the caller | Experiment, and the run above | Yes. This was not clear from the documentation. |
+| A cancel during `e2e` still runs `unlock-test` (issue 20) | Real run ([account 0.4.5](https://github.com/jross24/lab-svc-account/actions/runs/37763451461)) | Cancelled at 10:29:08. The suite ended at 10:29:44. `unlock-test` ran and passed. The lock was gone at 10:29:53. Everything after the suite was cancelled. |
+| "Re-run failed jobs" after a failed suite takes the lock again, and `unlock-test` runs again (issue 19) | Real run (the run of 0.4.3, attempt 2) | The holder text ended with `#2` from 10:13:45 to 10:14:40. Then the release went on to Staging. |
+| A re-run meets a lock that another run holds: the step fails and says what to do | Real run ([account 0.4.10](https://github.com/jross24/lab-svc-account/actions/runs/37771702730), attempt 2) | `The Test environment is locked, and this step does not wait.` The lock was held by a web release. Attempt 3 passed after the web release had ended. |
+| A redeploy to Test takes the lock and waits for a release (issue 24) | Real run ([redeploy 0.4.9](https://github.com/jross24/lab-svc-account/actions/runs/37771007792)) | The job `lock` waited 2 min 41 s for the release. The lock changed from the release to the redeploy and then to nobody. |
+| A run that lab-e2e starts waits for a release, then goes on (issue 19) | Real run ([push to main of lab-e2e](https://github.com/jross24/lab-e2e/actions/runs/37757001017)) | The job `lock` waited 4 min 22 s. It named the holder in the log, then ran the suite. |
+| A run that lab-e2e starts skips the suite with a notice when the wait is over (issue 19) | Real run ([manual run with `lock-wait-minutes=1`](https://github.com/jross24/lab-e2e/actions/runs/37771012232)) | The job `lock` ended after 1 min 13 s. `suite` and `unlock` were skipped. The run is green. |
+| A failed smoke check in Staging stops the promotion (issue 31) | Real run ([account 0.4.6](https://github.com/jross24/lab-svc-account/actions/runs/37764186112), the drill `smoke-staging`) | `deploy-staging` failed after the deployment. `supersede` and `deploy-production` were skipped. |
+| A failed smoke check in Production fails the job loud and proposes the way back (issue 31) | Real run ([account 0.4.7](https://github.com/jross24/lab-svc-account/actions/runs/37765579041), the drill `smoke-production`) | The job `deploy-production` failed. The summary named the way back. The redeploy of 0.4.4 started and waited for the reviewer ([run 37767421525](https://github.com/jross24/lab-svc-account/actions/runs/37767421525)). The lab cancelled it, as a false alarm. Production kept 0.4.7. |
+| The second change reaches Test and Staging while the first waits for Production (issue 14) | Real run (account 0.4.3 waited from 10:17:05; [account 0.4.4](https://github.com/jross24/lab-svc-account/actions/runs/37762494985) started at 10:17:42 and reached the gate at 10:23:55) | Yes. With the old design it would have waited until someone answered the first release. |
+| A newer release cancels the older release that waits for the reviewer (issue 14) | Real run (the job `supersede` of account 0.4.4) | `Cancelled run .../37761504619. It waited for the production reviewer, and v0.4.4 contains its changes.` Production history of `/lab/account/version`: 0.4.2, 0.4.4. The version 0.4.3 never reached Production. |
+| Production receives releases in order, also when a release is still in its canary (issue 14) | Real run (accounts 0.4.10, 0.4.11 and 0.4.12, see the timeline below) | The production job of each newer release was `pending` while the older one deployed. It started after the older one ended. |
+| A job that waits for environment approval holds its concurrency group; a third release replaces a second one | Experiment, and the runs above | Yes, as the GitHub documentation says. |
+| `queue: max` keeps the pending jobs in order and cancels none | Experiment (four pushes) | Yes. It is not used. |
+| A second job in the `production` environment asks for a second approval | Experiment | Yes. This is why the smoke check is a step in the deploy job. |
+| The nested call `release.yml` -> `run.yml` (environment, secrets, OIDC identity) | Real run, since 2026-10-07 and in every run above | Works as the section "How the nested call finds its environment, secrets and OIDC identity" says. |
+| A concurrency group is limited to one repository | Not tested with two repositories. | The documentation says so. The four services run their own jobs in their own groups, and the Test lock is the shared part. |
+| A force-cancel of the run, or a dead runner, leaves the lock until the expiry | Not tested. | From the documentation. The lock ends by itself after 40 minutes. |
+| "Re-run all jobs" of a release | Not run. | The job `build` replaces the release files and the artefact when the release exists. The lab changed the job for this, and ran only "Re-run failed jobs". |
+| `redeploy.yml` to Production, with the checks and the smoke check | Not run with an approval. The redeploy that `propose-rollback` started was cancelled. | The same workflow ran to Test (above). The reviewer step is the only difference. |
+
+### The timeline of three releases in order
+
+The lab merged three small pull requests of lab-svc-account in a row. Each release passed Test and Staging at its own pace. The log below lists the state of the job `deploy-production` of each release (UTC, 2026-10-08).
+
+| Time | Event |
 | --- | --- |
-| The pure functions of the lock (holder text, expiry, argument checks) | Tested by `actions/lock/test.sh`. CI runs it. |
-| The acquire and release logic: waiting, expiry, take-over, re-run, errors | Tested by `actions/lock/test.sh` against a fake `aws` command and a fake clock. The tests do not call AWS. |
-| The condition expression against the real DynamoDB table | **Not tested.** The tests check the text of the condition, and the fake applies the same rule. |
-| The lock between two real releases | **Not tested.** See the steps below. |
-| `unlock-test` after a failed E2E suite, a failed deploy and a cancel | **Not tested** in Actions. |
-| The nested call `release.yml` -> `run.yml` (environment, secrets, OIDC identity) | **Not tested.** It follows the documentation. |
-| The outputs of the E2E job reach `e2e-summary` when the suite fails | **Not verified.** The documentation does not say. `e2e-summary` writes "not recorded" for an empty output. |
-| A concurrency group is limited to one repository | From the documentation. Not tested. |
+| 12:03:05 | Account 0.4.10 ([run 37771702730](https://github.com/jross24/lab-svc-account/actions/runs/37771702730)) deploys to Production (the canary runs). |
+| 12:09:15 | Account 0.4.11 ([run 37774071710](https://github.com/jross24/lab-svc-account/actions/runs/37774071710)) has passed Staging. Its production job is `pending` in the group. |
+| 12:09:53 | 0.4.10 is done. |
+| 12:09:54 | 0.4.11 deploys to Production. |
+| 12:12:33 | Account 0.4.12 ([run 37774128271](https://github.com/jross24/lab-svc-account/actions/runs/37774128271)) has passed Staging. Its production job is `pending` behind 0.4.11. |
+| 12:16:51 | 0.4.11 is done. |
+| 12:16:52 | 0.4.12 waits for the reviewer. It asks only now. |
+| 12:17:12 | 0.4.12 deploys to Production. |
 
-### How to prove it in Actions
-
-[lab-platform#20](https://github.com/jross24/lab-platform/issues/20) tracks this work. Do it after the permission for SSM (lab-platform) is deployed in all three accounts, and after the release queue is free.
-The queue is free when the four waiting releases at `deploy-production` have an answer, and no release is running.
-
-1. Run the E2E workflow alone. It proves the login, the SSM read and the suite.
-
-   ```
-   gh workflow run run.yml --repo jross24/lab-e2e -f environment=test
-   gh run watch --repo jross24/lab-e2e
-   ```
-
-2. Open two small pull requests in two service repositories, for example a change to a README in lab-svc-catalogue and in lab-svc-account. Merge both in the same minute:
-
-   ```
-   gh pr merge <number> --repo jross24/lab-svc-catalogue --squash --delete-branch
-   gh pr merge <number> --repo jross24/lab-svc-account --squash --delete-branch
-   ```
-
-3. Watch the two runs. One `lock-test` job must say `The lock of test-environment is yours`. The other must print `is held by`, a link to the first run and the time that is left, then wait.
-
-   ```
-   gh run list --repo jross24/lab-svc-catalogue --workflow release --limit 1
-   gh run list --repo jross24/lab-svc-account --workflow release --limit 1
-   gh run view <run id> --repo <repository> --log | grep -E "lock|Waiting"
-   ```
-
-4. Read the lock while the first release runs (this is a read-only call):
-
-   ```
-   aws dynamodb get-item --table-name lab-test-lock --key '{"lockId":{"S":"test-environment"}}' --consistent-read --profile lab-test
-   ```
-
-5. The second `deploy-test` must start only after the first `unlock-test` finished. Compare the start and end times of the jobs:
-
-   ```
-   gh run view <run id> --repo <repository> --json jobs --jq '.jobs[] | [.name, .startedAt, .completedAt] | @tsv'
-   ```
-
-6. When both releases are done, `get-item` must return no item.
-
-7. The check of a failed suite: merge a change to lab-e2e that makes one test fail on purpose (for example, a test that expects the version `9.9.9` of web). Then release one service. `e2e` must fail, `unlock-test` must succeed, `deploy-staging` must be skipped, and `get-item` must return no item. Then revert the change in lab-e2e. This stops the gate for all teams while it is in place, so do it when nobody releases.
-
-8. The check of a cancel: start a release, cancel it while `e2e` runs, and check that `unlock-test` ran and `get-item` returns no item. If `unlock-test` did not run, the item must be gone 40 minutes after `acquiredAt`.
+The history of the parameter `/lab/account/version` in the Production account shows the same order: 0.4.8, 0.4.9, 0.4.10, 0.4.11, 0.4.12. Earlier in the day it showed 0.4.2 and then 0.4.4. The versions 0.4.3, 0.4.5 and 0.4.6 never reached Production: the first was cancelled by the next release, the second was cancelled by the lab, and the third failed a smoke check in Staging.
 
 ## The redeploy workflow
 
@@ -346,6 +380,15 @@ Then it deploys the zip to that environment. It does not build.
 Use it to go back to an old version. The old version is the old artefact, not a new build of old code.
 For a service that releases in steps, a redeploy moves the traffic in steps too. A redeploy to `production` takes more than 5 minutes.
 The rules of the GitHub environment apply to a redeploy too. A redeploy to `production` waits for the reviewer.
+
+A redeploy follows the same rules as a release in these places:
+
+- **The Test lock.** A redeploy to `test` has the job `lock` before the deployment and the job `unlock` after it. It waits up to 20 minutes for a release that uses Test, then it fails. A redeploy to Staging or Production takes no lock.
+- **The concurrency group.** The job `redeploy` uses the group `deploy-<environment>`, the same group as the release jobs `deploy-staging` and `deploy-production`. A redeploy and a release of one repository never deploy to one environment at the same time. To roll back while a release waits for the reviewer in Production, reject or cancel the waiting release first.
+- **The checks before the deployment**, in the mode `redeploy`. A provider that is missing or too old still stops the redeploy, because the stack would fail. The check "no step back" does not stop it, because going back is the aim. The tested set does not stop it either. A rollback must not wait for a neighbour. The table of the summary shows an older neighbour as a warning.
+  The record of the tested set comes from `tested-with.json` of the GitHub release. A release from before the record has none, and the check says so.
+- **`pipeline.json`.** A tag from before the checks has no such file. Then the redeploy reads the file of the default branch and says so in a notice.
+- **The smoke check.** A redeploy to Staging or Production runs the smoke subset after the deployment, for the version that it deployed. A redeploy to Test does not, because Test has the full suite in the release.
 
 ## Use the pipeline in a service repository
 
@@ -358,16 +401,10 @@ on:
   pull_request:
 permissions:
   contents: read
-  id-token: write
-  pull-requests: write
 jobs:
   pr:
     uses: jross24/lab-workflows/.github/workflows/pr.yml@main
-    secrets: inherit
 ```
-
-The `pr` caller needs the two extra permissions and the secrets, because the job `diff` reads the deployed stack and writes a comment.
-See "The cdk diff comment" for the details. If the caller grants less than the called workflow asks, GitHub does not start the run at all, and the required check never reports.
 
 ```yaml
 # .github/workflows/release.yml
@@ -375,12 +412,11 @@ name: release
 on:
   push:
     branches: [main]
-concurrency:
-  group: release
-  cancel-in-progress: false
+# No concurrency group here. release.yml orders the releases job by job. See "Releases in order".
 permissions:
-  contents: write
-  id-token: write
+  contents: write # the version tag and the GitHub release
+  id-token: write # the OIDC login to AWS
+  actions: write # a newer release cancels an older release that waits for the production reviewer
 jobs:
   release:
     uses: jross24/lab-workflows/.github/workflows/release.yml@main
@@ -416,14 +452,52 @@ jobs:
     secrets: inherit
 ```
 
+The file must be named `redeploy.yml`. After a failed smoke check in Production, `release.yml` starts the workflow with this name.
+
+A fourth file is optional. It starts a dry run of the checks:
+
+```yaml
+# .github/workflows/check.yml
+name: check
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: The environment to read
+        required: true
+        type: choice
+        options: [test, staging, production]
+      version:
+        description: The version to check, for example 1.2.3
+        required: false
+        type: string
+      requires:
+        description: 'A JSON object that replaces "requires" for this run only'
+        required: false
+        type: string
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  check:
+    uses: jross24/lab-workflows/.github/workflows/check.yml@main
+    with:
+      environment: ${{ inputs.environment }}
+      version: ${{ inputs.version }}
+      requires: ${{ inputs.requires }}
+    secrets: inherit
+```
+
 The service repository must have these things:
 
 - The npm scripts `lint`, `typecheck` and `test`, and a committed `package-lock.json`.
 - A CDK app that makes the stages `Test`, `Staging` and `Production` in one `cdk synth`. The stacks have no account and no region in the code.
-- A context value `version`. The app puts it in a stack output named `Version`.
+- A context value `version`. The app puts it in a stack output named `Version`, and in the SSM parameter `/lab/<service>/version`.
+- The file `pipeline.json` (see "The file `pipeline.json`").
 - The GitHub environments `test`, `staging` and `production`. Each one has a secret `AWS_ACCOUNT_ID`.
 - A repository variable `AWS_REGION`.
 - A name that starts with `lab-`. The trust policy of the `github-deploy` role accepts only those repositories.
+- The roles of the services that it reads: `github-deploy` needs `ssm:GetParameters` on `/lab/*` in each account (lab-platform).
 
 ## The cdk diff comment
 
@@ -669,6 +743,203 @@ What the runs did not prove:
 - A **Dependabot** pull request. Unit tests only.
 - The sweeper on its **schedule**. The runs above started from a branch with a temporary trigger. The first scheduled run is at the next hour that fits the cron expression.
 
+## The file `pipeline.json`
+
+Each service repository has the file `pipeline.json` at its root. It tells the pipeline which service the repository holds and which other services it needs.
+
+```json
+{
+  "service": "catalogue",
+  "requires": { "core": ">=0.5.0" },
+  "compatible": { "web": ">=0.3.0" }
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `service` | Required. The name of the service: lower case letters, digits and hyphens. It is the same name as in the SSM parameter `/lab/<service>/version`. |
+| `requires` | The providers of the service. Each key is a service. Each value is a range. The service cannot be deployed to an environment that has a provider outside its range. |
+| `compatible` | Optional. Neighbours that may be older in an environment than in the tested set, as long as they are inside the range. The service does not call them. It only says that it works with the older version. For a neighbour that has a `compatible` range and a `requires` range, the `compatible` range counts. Only the lower side matters: a newer neighbour always goes on, with a notice. |
+
+A range is one or more comparators with a space between them. All of them must hold. The operators are `>=`, `>`, `<=`, `<` and `=`. A version with no operator means `=`.
+Examples: `>=0.5.0`, `>=0.5.0 <1.0.0`, `1.2.3`. A caret range such as `^0.5.0` is not supported. A wrong range stops the release with a message that names the file.
+
+The job `version` reads and checks the file before it makes the tag. A key that the pipeline does not know is an error, so a typo such as `require` does not pass in silence.
+The lab names the repository of a service `lab-svc-<service>`, except `web`, which is `lab-web`. The messages use this rule to say where to release a missing version.
+
+The pipeline files of the four services today:
+
+| Service | `requires` | `compatible` |
+| --- | --- | --- |
+| core | nothing | nothing |
+| catalogue | `core >=0.5.0` | nothing |
+| account | `core >=0.5.0` | nothing |
+| web | `catalogue >=0.3.0`, `account >=0.3.0` | nothing |
+
+## What each stack publishes: the deployed version
+
+Each service stack writes the SSM parameter `/lab/<service>/version` in its account. The value is the version of the release.
+The parameter depends on the alias of the Lambda function in the stack. With a canary, CloudFormation updates the alias, waits for the CodeDeploy deployment, and only then updates the parameter.
+So the parameter shows the new version when the release is complete. If the canary rolls back, the stack rolls back and the parameter keeps the old version.
+The role `github-deploy` can read these parameters (`ssm:GetParameters` on `/lab/*`). The checks read them in the account of the job.
+
+## The checks before a deployment
+
+Before a deploy job changes an environment, the action `actions/preflight` reads `/lab/<service>/version` of the services that matter, in the account of that environment. It compares them in three ways. Each deploy job runs the checks right before `cdk deploy`. In `deploy-test`, the step that makes sure the run holds the lock comes first.
+The result is a table in the job summary and a clear message for each failure. A failure stops the job before `cdk deploy` changes anything.
+
+| Check | Question | Fails when |
+| --- | --- | --- |
+| No step back | Is this release newer than what the environment runs? | The environment runs a newer version of this service. |
+| Providers (issue 16) | Does the environment have each provider of `requires`, inside its range? | A provider has no version in the environment, or its version is outside the range. |
+| Tested set (issue 21) | Does the environment have, for each neighbour, at least the version that the E2E suite tested? | A neighbour is older than the tested version and no range accepts it. |
+
+The checks run after the approval of the production reviewer, right before the deployment. They read the state at that time. A reviewer can approve hours after the release started, and the state can change in that time.
+A check cannot run before the approval, because the job needs the AWS role of the environment, and the role needs the approval.
+
+### No step back
+
+Releases of one repository can arrive out of order. A late run of an old release could move an environment back. The check compares the version of the release with `/lab/<service>/version`:
+
+- No parameter: the first deployment. It goes on.
+- The release is newer: it goes on.
+- The same version: it goes on. This is a run again of a release.
+- The environment is newer: the job fails with `Release superseded`. The environment keeps its version.
+
+The check uses numbers, not text. `0.10.0` is newer than `0.9.0`.
+
+### Providers
+
+A service reads the SSM parameters of its providers when CloudFormation deploys it. Without the check, a missing provider fails the deployment in the middle of CloudFormation, with an error about a missing parameter.
+The check fails early, and the message says what to do. For example:
+
+```
+::error title=Provider too old::catalogue needs core >=0.6.0, but production runs core 0.5.1. Release core to production first (repository lab-svc-core), then run this job again.
+```
+
+The check also finds the case of a provider that runs in the environment but publishes no version (a stack from before the parameter existed). The message says to release the provider once.
+The check does not solve the second effect of issue 16: a consumer keeps the old URL of a provider until its next release. That is a property of CloudFormation, and the README of each service describes it.
+
+### The check of the tested set
+
+The next section explains what the tested set is. The check compares each neighbour in the set with the environment:
+
+| Neighbour in the environment | Result |
+| --- | --- |
+| The same version as in the tested set | Goes on. |
+| Newer than the tested set | Goes on, with a notice. |
+| Older, and inside the range of `compatible` or `requires` | Goes on. The table says that `pipeline.json` accepts it. |
+| Older, and no range accepts it | The job fails with `Missing release`. The message names the version and the repository to release. |
+| Not deployed (no parameter) | Goes on, with a notice. There is nothing to compare. |
+
+A range in `compatible` is a statement of the owner: "this service works with the older version". The pipeline cannot know it. An undeclared neighbour is strict on purpose.
+The failure message looks like this:
+
+```
+::error title=Missing release::core 0.5.2 was in the set that the E2E suite tested with web 0.4.0 (release v0.4.0 of web), but production runs core 0.5.1. Release core 0.5.2 to production first (repository lab-svc-core), then run this job again. Or add a range for core to pipeline.json, if web works with the older version.
+```
+
+When the missing release reaches the environment, run the failed job again. The check reads the state again and passes.
+
+### A dry run: `check.yml`
+
+The reusable workflow `check.yml` runs the same checks and deploys nothing. A service repository can call it from a `workflow_dispatch` workflow.
+The input `requires` replaces `requires` of `pipeline.json` for that run only. So a person can see the failure message of a check without a release and without a change to `main`:
+
+```
+gh workflow run check.yml --repo jross24/lab-svc-account -f environment=production -f requires='{"core":">=9.9.9"}'
+```
+
+The job runs in the GitHub environment of the input. A dry run against `production` waits for the production reviewer, like every job in that environment.
+
+## The tested set
+
+The E2E suite tests the set of versions that is in Test at that time. The lock makes the result belong to one release. But each service repository promotes by itself. Staging can hold another set than Test, and Production a third one. "It passed in Test" does not mean "this set works in Production".
+
+The pipeline now carries the record of what passed:
+
+1. The suite reports the version of web, catalogue, account and core that it observed.
+2. The job `tested-set` checks that the record is complete and that the suite tested **this** release (the version of the service itself must be the version of the release). It fails otherwise, and Staging does not start.
+3. The record is the output `json` of the job. It is also the file `tested-with.json` on the GitHub release of the tag. A redeploy reads the file from there.
+4. `deploy-staging` and `deploy-production` compare the record with `/lab/<service>/version` of their own environment (see "The checks before a deployment").
+
+The record has this form:
+
+```json
+{"release":"v0.4.0","service":"web","version":"0.4.0","commit":"<sha>","e2eCommit":"<sha>",
+ "versions":{"web":"0.4.0","catalogue":"0.3.1","account":"0.3.1","core":"0.5.1"}}
+```
+
+### What this guarantees, and what it does not
+
+It guarantees this: **when a release goes to an environment that has a version of a neighbour, that neighbour is the same version as in the tested set, or newer, or older but accepted by the owner in `pipeline.json`.** A release cannot reach Production next to an older neighbour that nobody looked at.
+The message names the missing release, so the person knows what to release first.
+The guarantee has gaps on purpose: a neighbour with no version in the environment only gives a notice, a release with `run-e2e: false` has no record to compare, and a redeploy only warns.
+
+It does not guarantee these things:
+
+- It does not test the set in Staging or in Production. It compares version numbers. The smoke subset checks the live system after the deployment, but it is small.
+- It does not know whether a newer neighbour still works with this release. An upper bound in a range of `compatible` has no effect for the same reason. A newer neighbour only gives a notice. The contract tests of [lab-platform#34](https://github.com/jross24/lab-platform/issues/34) are the tool for that.
+- It trusts the owner who writes a range in `pipeline.json`.
+- It reads versions from SSM. A parameter that a person changed by hand would give a wrong answer. The role of the pipeline cannot write the parameters, and only the stack writes them.
+- Between the check and the deployment there are a few seconds. Another release of another repository can deploy in that time.
+
+### Why this is cheaper than promoting all services as one set
+
+The alternative is to promote the four versions together, as one unit: one manifest, one approval, all four deployments in one run. That has real benefits. The set that passed is the set that deploys, with no gap.
+It also has costs:
+
+- Every change to one service now needs a release of all four. A small fix in web waits for the slowest service, and a failure of one deployment holds back the others.
+- The services lose their own pace. The reason for several repositories (a team ships when it is ready) is gone.
+- The unit grows with each service. A fifth service joins every release.
+- One approval in Production covers four deployments. A reviewer reads less about each change.
+
+The comparison costs one SSM call (a few seconds) in the job that deploys, and no new job, no new approval and no shared release. The price is that the guarantee is weaker. The check shows that the neighbours are not older than the tested ones. It does not run the whole set in Production.
+For a lab with four small services, the comparison is the cheaper choice. A team with many tightly coupled services would choose the unit.
+
+## Smoke checks in Staging and Production
+
+After the deployment, `deploy-staging` and `deploy-production` run the smoke subset of the E2E suite against their own environment. The tests with the tag `@smoke` in [lab-e2e](https://github.com/jross24/lab-e2e) form the subset. They only read:
+
+- The page of web loads and shows no error block.
+- Each public API answers with the documented shape.
+- The versions on the page equal the versions that the services report.
+- **The released service reports the version of the release.** The job passes the service and the version to the suite.
+
+The smoke subset runs as steps of the deploy job, through the action `actions/suite` of lab-e2e. It is not a separate job, for two reasons:
+
+- A second job in the `production` environment needs a second approval of the reviewer. The lab checked this: GitHub asks again for each job that names a protected environment.
+- The deploy job holds the concurrency group of its environment. No other release of the repository can deploy between the deployment and the check. A separate job would let the next release change the service first, and the check would then see another version.
+
+A failed smoke check in Staging fails `deploy-staging`. `deploy-production` needs `deploy-staging`, so the promotion stops.
+
+### A failed smoke check in Production
+
+The canary and its alarms watch the first minutes of the release. The smoke check is the last line, after the canary has moved all the traffic. A failure at that point means that the new version carries all the traffic and fails a check.
+
+The job `deploy-production` then fails, so the run is red. This is the loud part. The last step, `propose-rollback`, does three things:
+
+1. It writes an error annotation and a summary with the way back, including the exact command.
+2. If Production ran an earlier version of the service, it starts the workflow `redeploy.yml` of the service repository for that version. That run waits for the production reviewer, like every deployment to Production.
+3. It never changes Production by itself.
+
+The lab chose this over an automatic rollback for these reasons:
+
+- A smoke check can fail for a reason that is not a fault of the release, for example a network error of the runner. An automatic rollback of a good release is a second incident, and a rollback takes a canary of 5 minutes.
+- The redeploy waits for a person, so the person decides with the facts of the summary. A false alarm costs one click: cancel the run.
+- A rollback needs the stored cloud assembly of the earlier release. The redeploy workflow already does this, with the same checks and the same canary.
+- The redeploy run holds the concurrency group `deploy-production`. So no newer release deploys to Production before the person has decided.
+
+If Production had no earlier version, or the earlier version is the same, there is nothing to go back to. The summary says so, and the way forward is a new release.
+Rollback by `redeploy.yml` works for releases that have a stored assembly. The README of each service says which old versions cannot be redeployed.
+
+## The fault drill
+
+Two proofs need a suite that fails on purpose: a failed suite stops the release and still releases the lock, and a failed smoke check stops the promotion. The drill makes that possible without a broken `main`.
+The owner of a service repository sets the repository variable `E2E_FAULT_DRILL` to one token: `full-test`, `smoke-staging` or `smoke-production` (the full list is in the README of lab-e2e).
+The next release fails in the run that the token names. Remove the variable to end the drill. The release workflow passes `vars.E2E_FAULT_DRILL` of the caller repository to the suite.
+The redeploy workflow passes the variable too. A token such as `smoke-production` makes the smoke check of the redeploy that `propose-rollback` starts fail as well. Remove the variable before you approve that rollback.
+
 ## Secrets, variables and OIDC in a reusable workflow
 
 The account ID of each environment is an environment secret of the service repository.
@@ -700,19 +971,72 @@ One rule comes only from the GitHub documentation: the secret is an empty string
 
 The job `e2e` adds a second level: `release.yml` calls `run.yml` of lab-e2e. The section "The end-to-end gate" explains how the environment, the secrets and the OIDC identity work there.
 
-## Two releases at the same time
+## Releases in order
 
-The `concurrency` block in the caller makes a second release wait for the first one.
-`cancel-in-progress: false` means that GitHub never stops a deployment that is in progress.
+Four things decide how releases of one repository follow each other: the concurrency groups, the Test lock, the check "no step back", and the job `supersede`.
 
-This block works for the releases of one repository only. The Test lock (above) makes the releases of different repositories wait for each other.
+### The old design and its two effects
 
-Know these two limits:
+The first design put one `concurrency` group in the caller workflow of each service: `group: release`, `cancel-in-progress: false`. It covered the whole run. Two effects hurt (issue 14):
 
-- A release that waits for the production reviewer is still in progress. The next release waits behind it until someone approves or rejects it.
-- By default, GitHub keeps only one waiting run in a group. If a third release arrives, GitHub cancels the second one. The third release contains the commits of the second one, so no change is lost. The documentation also describes `queue: max`. It lets up to 100 runs wait. The lab does not use it.
+- A release that waits for the production reviewer is still in progress. The next merge to `main` does not reach Test or Staging until someone approves or rejects the waiting release.
+- GitHub keeps one waiting run in a group. A third release cancels the second one.
 
-The release with the lock waits at `lock-test`, before it deploys. A release that waits for the lock is in progress, so the next release of the same repository waits behind it.
+The opposite design, no group at all, is worse. Two releases could wait for Production at the same time, and a late approval of the older one would move Production back.
+
+### The design now
+
+The caller has no `concurrency` group. The jobs that touch one environment have a group of their own, inside `release.yml`. This works in a called workflow: the lab tested job-level groups in a reusable workflow, and GitHub accepts them.
+
+| Group | Job | What it does |
+| --- | --- | --- |
+| `release-version` | `version` | Two versions are made one after the other, so two runs cannot read the same tags. |
+| `release-test-queue` | `lock-test` | One release of the repository waits for the Test lock at a time. |
+| `deploy-staging` | `deploy-staging` | One deployment to Staging at a time. The smoke check is inside the job. |
+| `deploy-production` | `deploy-production` | One deployment to Production at a time. A job that waits for the reviewer holds the group. |
+
+All groups use `cancel-in-progress: false`. GitHub never stops a deployment that is running.
+A group belongs to one repository, so the four services do not wait for each other here. The Test lock does that.
+
+`redeploy.yml` uses the groups `deploy-<environment>`. So a redeploy and a release of the same repository cannot deploy to one environment at the same time.
+
+What GitHub does with a group (checked in a real experiment on 2026-10-08, and in the real runs below):
+
+- A job that waits for the reviewer **holds** its group. The next release is `pending` at the same job. The reviewer of the next release is not asked yet.
+- A group keeps one `pending` job. A third release replaces the second one, and the run of the second release ends as `cancelled`. The third contains the changes of the second.
+- `queue: max` keeps up to 100 jobs, in first-in-first-out order, and cancels none of them. The lab tested it. It is not used here. Every release would then need its own approval in Production, also the old ones that the next release contains. The default group with one pending job fits better: the newest change wins.
+- A second job in the same run that names a protected environment asks for approval again. This is why the smoke check is a step in the deploy job.
+
+### The older approval is superseded
+
+A release that waits for the reviewer holds the group `deploy-production`. When the next release reaches the end of Staging, its job `supersede` looks for older runs of the same workflow that:
+
+- have the status `waiting` (nobody approved them, so they do not deploy),
+- are older than this run,
+- wait in a job whose name ends with `deploy-production`.
+
+It cancels them with `gh run cancel`. The job needs the permission `actions: write`, and the caller must give it. The new release contains the changes of the old one, so the old approval has no use.
+The reviewer then sees one waiting release, the newest. The job checks the status of the run again right before the cancel. A run that the reviewer approved in the meantime is not cancelled.
+The job never fails the release. If the cancel does not work, the guard "no step back" and the group still keep the order, and the old run waits first.
+
+If the old release was already approved and deploys, nothing is cancelled. The next release waits in the group until the deployment ends. Then it asks for its own approval.
+
+### "Production receives releases in order"
+
+Four rules make this true:
+
+1. One deployment to Production at a time (the group).
+2. A waiting approval holds the group, so a newer release cannot deploy before it. It either waits behind it, or it cancels the older run first (`supersede`).
+3. A release that is older than Production does not deploy (the check "no step back"). A group orders the jobs by the time they arrive, and a release with a slower build can arrive later than a newer one. The check catches this case, and also a late approval. The late release fails with `Release superseded`.
+4. A third release replaces a second one that waits for the group. The changes are not lost, because the newest release contains them.
+
+The `redeploy` workflow is the exception on purpose. It can put an older version into Production, because a rollback must be possible. It uses the same group. To roll back while a release waits for the reviewer, reject or cancel the waiting release first. Otherwise the redeploy waits behind it.
+The group keeps one pending job, so a pending redeploy and a pending release can replace each other. A redeploy that the job `propose-rollback` starts can cancel the pending job of a newer release. Re-run that release after you have decided about the rollback.
+The job `supersede` sees only runs with the status `waiting`. An older run that still waits for the group is not cancelled by it. The group replaces it when a third release arrives.
+
+### The migration
+
+The rules need the caller to give `actions: write` and to have no workflow-level group. A caller with `permissions` that lack `actions: write` makes the run fail at the start, because a called workflow cannot ask for more than its caller gives. Change the callers first, then change this repository.
 
 ## Why the references use `@main`
 
@@ -847,7 +1171,7 @@ The CI of this repository downloads both tools on each run. So a wrong hash or a
 ## Checks of this repository
 
 The `ci` workflow runs on each pull request. It installs `actionlint` and `gitleaks` with `actions/install-tool`.
-It runs the tests of the scripts: next-version, lock, install-tool, changed-paths and secret-scan. It also runs `shellcheck` and `actionlint`.
+It runs the tests of the scripts: next-version, lock, preflight, supersede, propose-rollback, install-tool, changed-paths and secret-scan. The new tests need `jq`, which the runner image has. It also runs `shellcheck` and `actionlint`.
 
 `actionlint` is not optional. It checks every workflow file in `.github/workflows/`, and it runs `shellcheck` on the `run:` scripts.
 Any finding fails the job `check`. `shellcheck` on the scripts still runs only if the runner image has it, and the image has it today.

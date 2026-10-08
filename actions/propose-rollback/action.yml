@@ -1,0 +1,33 @@
+name: propose rollback
+description: Runs after a failed smoke check in Production. It starts the redeploy of the earlier version. That run waits for the production reviewer. It never fails.
+
+# The job needs the permission actions: write, and the caller of the release must give it.
+# The redeploy workflow of the service repository must be the file redeploy.yml. The README explains the choice.
+inputs:
+  service:
+    description: The name of the service.
+    required: true
+  version:
+    description: The version that failed the smoke check.
+    required: true
+  previous:
+    description: The version that ran in Production before the deployment. Empty if there was none.
+    default: ''
+  workflow:
+    description: The file of the redeploy workflow in the service repository.
+    default: redeploy.yml
+  token:
+    description: The token for the GitHub API.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PR_SERVICE: ${{ inputs.service }}
+        PR_VERSION: ${{ inputs.version }}
+        PR_PREVIOUS: ${{ inputs.previous }}
+        PR_WORKFLOW: ${{ inputs.workflow }}
+      run: bash "$GITHUB_ACTION_PATH/propose-rollback.sh"

@@ -1,0 +1,69 @@
+name: check
+
+# A dry run of the checks before a deployment. It deploys nothing and changes nothing. It reads SSM in the environment,
+# and it shows the table of the checks in the summary of the job. The README explains the checks.
+#
+# Use it to ask "could this service go to that environment now?", and to see the failure message of a check without a release.
+# The input "requires" replaces the "requires" of pipeline.json for this run only. It does not change the file.
+#
+# The job runs in the GitHub environment of the caller, so a dry run against production waits for the production reviewer.
+# The caller must give these permissions: contents: read, id-token: write.
+# The caller must pass its secrets with "secrets: inherit".
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: The environment to read. One of test, staging, production.
+        type: string
+        required: true
+      version:
+        description: The version of the release to check, for example 1.2.3. Leave it empty to skip the check of the release itself.
+        type: string
+        required: false
+        default: ''
+      requires:
+        description: 'A JSON object that replaces "requires" for this run, for example {"core":">=9.9.9"}. Leave it empty to use pipeline.json.'
+        type: string
+        required: false
+        default: ''
+
+permissions: {}
+
+jobs:
+  # A job that names an environment that does not exist creates it. So this job checks the name first.
+  names:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          case "$ENVIRONMENT" in
+            test | staging | production) ;;
+            *)
+              echo "::error::environment must be test, staging or production."
+              exit 1
+              ;;
+          esac
+
+  dry-run:
+    needs: [names]
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - uses: jross24/lab-workflows/actions/preflight@main
+        with:
+          environment: ${{ inputs.environment }}
+          version: ${{ inputs.version }}
+          requires-override: ${{ inputs.requires }}
