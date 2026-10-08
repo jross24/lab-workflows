@@ -88,6 +88,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # Every IAM role of the preview must carry the permissions boundary of the dev account. CDK reads the key from
+      # the cdk.json of the user. The flag -c cannot set it: the flag gives a string, and the key needs an object.
+      # This file is a convenience, not the protection. Code of the pull request can ignore it. The execution policy
+      # of the CloudFormation role in the dev account refuses to create a role without the boundary.
+      - name: set the permissions boundary of the dev account
+        run: echo '{"context":{"@aws-cdk/core:permissionsBoundary":{"name":"lab-dev-boundary"}}}' > "$HOME/.cdk.json"
       - name: synthesise the Dev stage under the namespace of the pull request
         env:
           NAMESPACE: ${{ needs.plan.outputs.namespace }}
