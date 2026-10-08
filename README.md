@@ -521,6 +521,9 @@ The role trusts `diff.yml` on `main` only. To test a branch, use the `dev` accou
 - The default `--method auto` of `cdk diff` creates a change set and uses the deploy role. That is a write call. `--method template` uses the lookup role. `--template <file>` needs no AWS call.
 - The lookup role has the managed policy `ReadOnlyAccess`, so it can read S3 objects and DynamoDB items. The diff does not use it.
 - The context value `github.job_workflow_sha` is empty in a reusable workflow, although the documentation lists it. The OIDC claim `job_workflow_sha` has the value.
+- `cdk diff --template` compares one stack only. A stack that depends on another stack of the app makes the CLI select both, and it stops with "Can only select one stack". The workflow passes `--exclusively`.
+- The name of a workflow artefact must be unique in a run. The platform repository calls `diff.yml` four times in one run, once for each account. The first version used the name `deployed` in all four calls.
+  Each `compute` job then downloaded the templates of another account, and the diff showed every resource as new. The artefact names now hold the `key` of the call.
 
 ## The temporary environment of a pull request
 
