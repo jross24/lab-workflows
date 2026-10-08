@@ -1,0 +1,21 @@
+name: secret scan
+description: Scans the commits of a pull request for secrets with gitleaks. The caller must check out the repository with the full history (fetch-depth 0) and install gitleaks first with actions/install-tool.
+
+inputs:
+  base:
+    description: The base commit. The default is the base commit of the pull request.
+    required: false
+    default: ${{ github.event.pull_request.base.sha }}
+  head:
+    description: The head commit. The default is the head commit of the pull request.
+    required: false
+    default: ${{ github.event.pull_request.head.sha }}
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        BASE: ${{ inputs.base }}
+        HEAD: ${{ inputs.head }}
+      run: bash "$GITHUB_ACTION_PATH/scan.sh" "$BASE" "$HEAD"

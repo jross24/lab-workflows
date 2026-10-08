@@ -1,0 +1,7 @@
+# The rules of the secret scan. This file is the only config that the scan uses.
+# The scan ignores any gitleaks config or ignore file inside the scanned repository.
+# So a pull request cannot weaken the scan. A false positive needs an allow rule here, in a pull request to lab-workflows.
+title = "lab-workflows secret scan"
+
+[extend]
+useDefault = true

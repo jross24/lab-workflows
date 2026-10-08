@@ -3,7 +3,7 @@
 This repository holds the shared pipeline of the pipeline lab.
 A service repository does not copy the pipeline. It calls the workflows in this repository.
 
-The pipeline has three reusable workflows and four composite actions.
+The pipeline has three reusable workflows and several composite actions.
 
 | File | What it does |
 | --- | --- |
@@ -14,6 +14,9 @@ The pipeline has three reusable workflows and four composite actions.
 | `actions/deploy` | Deploys one CDK stage from the cloud assembly of the build job. |
 | `actions/lock-acquire` | Takes the lock of the shared Test environment. It waits when another release holds the lock. |
 | `actions/lock-release` | Releases that lock. It never fails the release. |
+| `actions/install-tool` | Installs a tool from a pin: a version, a url and a SHA-256. It checks the download before it uses it. |
+| `actions/changed-paths` | Tells whether a pull request changes a file under some paths, for example `.github/`. |
+| `actions/secret-scan` | Scans the commits of a pull request for secrets with `gitleaks`. It never prints a secret. |
 
 ## Build once, promote the same artefact
 
@@ -468,8 +471,55 @@ This lab accepts `@main` for two reasons. One person owns all the repositories. 
 
 Actions from other owners are different. This repository pins each of them to a full commit SHA.
 
+## Install a tool with a pinned checksum
+
+The pipeline downloads two tools: `actionlint` and `gitleaks`. The action `actions/install-tool` installs them.
+It reads the pin of the tool in `actions/install-tool/tools.txt`. A pin has the tool, the version, the platform, the url and a SHA-256.
+The SHA-256 is the hash of the downloaded archive.
+
+The script downloads the archive and calculates its SHA-256. It compares the result with the pin before it extracts anything.
+If the two hashes differ, the script fails and installs nothing. If they match, it extracts the one file with the name of the tool and adds its directory to the `PATH`.
+
+```yaml
+- uses: jross24/lab-workflows/actions/install-tool@main
+  with:
+    tool: actionlint
+- run: actionlint
+```
+
+### Why a pinned hash and not a checksum file
+
+Each release of these tools also publishes a checksums file. The pipeline does not fetch that file. It comes from the same release page as the archive.
+A person who can replace the archive can replace the checksums file too. Then the check proves nothing.
+
+The pin is in this repository. A change to a pin is a pull request that a person reads.
+So the trusted value comes from a place that an attacker on the release page cannot change.
+
+The lab chose a pinned download and not a container image digest. The tools are static binaries, so the job pulls no image and starts no daemon.
+A pinned download also adds no third-party action to trust.
+
+### The trade-off
+
+A pin does not update itself. Dependabot does not read `tools.txt`. A person must update a tool in one pull request that changes the version, the url and the hash together.
+
+A pin does not prove that the release was clean on the day of the pin. The person who sets the pin checks the hash in three ways.
+These are: a download that the person made, the checksums file of the release, and the digest that the GitHub API shows for the file. All three must agree.
+
+### The pins now
+
+| Tool | Version | SHA-256 of the Linux x86_64 archive |
+| --- | --- | --- |
+| `actionlint` | 1.7.12 | `8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8` |
+| `gitleaks` | 8.30.1 | `551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb` |
+
+To add or change a tool, edit `tools.txt` and run `bash actions/install-tool/test.sh`.
+The CI of this repository downloads both tools on each run. So a wrong hash or a wrong url fails the CI.
+
 ## Checks of this repository
 
-The `ci` workflow runs on each pull request. It runs the tests of the next-version script and the tests of the lock script.
-It also runs `shellcheck` and `actionlint`, but only if the runner image already has them. The repository installs no tool.
-The runner image has `shellcheck`. It does not have `actionlint`, so the CI skips it and no tool checks the workflow files. See [lab-platform#22](https://github.com/jross24/lab-platform/issues/22).
+The `ci` workflow runs on each pull request. It installs `actionlint` and `gitleaks` with `actions/install-tool`.
+It runs the tests of the scripts: next-version, lock, install-tool, changed-paths and secret-scan. It also runs `shellcheck` and `actionlint`.
+
+`actionlint` is not optional. It checks every workflow file in `.github/workflows/`, and it runs `shellcheck` on the `run:` scripts.
+Any finding fails the job `check`. `shellcheck` on the scripts still runs only if the runner image has it, and the image has it today.
+See [lab-platform#22](https://github.com/jross24/lab-platform/issues/22).

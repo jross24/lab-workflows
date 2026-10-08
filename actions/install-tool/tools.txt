@@ -1,0 +1,11 @@
+# The pins of the tools that the pipeline downloads. One row for each tool and platform:
+#
+#   tool  version  platform  sha256-of-the-download  url
+#
+# The SHA-256 is the hash of the file at the url (the archive), not of the binary inside it.
+# To update a tool: change the version, the url and the hash together in one pull request.
+# Take the hash from your own download (sha256sum), then compare it with the checksums file of the release.
+# A pin is checked by actions/install-tool/test.sh, and CI downloads and verifies the Linux pins of the tools that it uses.
+
+actionlint 1.7.12 linux-x86_64 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+gitleaks 8.30.1 linux-x86_64 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz

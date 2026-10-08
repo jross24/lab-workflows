@@ -1,0 +1,4 @@
+{{- /* One line for each finding: rule, file, line and commit, separated by tabs.
+       The template must not use .Secret, .Match, .Line, .Author, .Email or .Message. */ -}}
+{{ range . }}{{ .RuleID }}{{ "\t" }}{{ .File }}{{ "\t" }}{{ .StartLine }}{{ "\t" }}{{ .Commit }}
+{{ end }}
