@@ -826,6 +826,8 @@ The stack of the service must have the name `<repository>-<namespace>`, and it m
 - The role chain needs `role-skip-session-tagging: true`. `configure-aws-credentials` tags the new session when it chains into another role. A tagged session needs `sts:TagSession` in the trust policy of the target role, and the CDK bootstrap roles do not have it.
   The first destroy failed with `not authorized to perform: sts:TagSession`. The step now skips the tags.
 - A workflow with `workflow_dispatch` cannot start from a branch until the file is on the default branch. To test the sweeper, a temporary `push` trigger on the test branch started it.
+- With the custom execution policy and the boundary, a preview of lab-svc-catalogue deployed ([run 37850862914](https://github.com/jross24/lab-svc-catalogue/actions/runs/37850862914)). Both roles of the stack carried the boundary. Closing the pull request without a merge destroyed the stack ([run 37851168973](https://github.com/jross24/lab-svc-catalogue/actions/runs/37851168973)).
+  The README of lab-platform lists the refused stacks: an SQS queue, a role without the boundary, an IAM user and a role named `github-*`.
 - `cdk deploy --tags` replaces the tags that the app sets on the stack. The resources keep the tag `lab-namespace`, and the stack keeps the two preview tags.
 
 ## What the real runs showed for the diff and the preview
