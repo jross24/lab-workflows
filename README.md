@@ -442,7 +442,7 @@ So only the file `diff.yml` on `main` of this repository can use the role. The R
 ### The version number is not a change
 
 The synth of a pull request uses the version `0.0.0-dev` by default. A release uses a new version. So the version would show as a change on every pull request.
-The job `fetch` reads the output `Version` of the deployed stack. The job `compute` synthesises with `-c version=<that version>`.
+The job `fetch` reads the output `Version` from the deployed template (not from the stack outputs, which lag during a deployment). The job `compute` synthesises with `-c version=<that version>`.
 The comment says which version it used. Set the input `pass-version` to `false` for an app that has no `version` context value.
 
 ### The stateful change guard
