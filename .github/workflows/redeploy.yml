@@ -1,8 +1,14 @@
 name: redeploy
 
 # The rollback path. It deploys the cloud assembly of an old release again. It does not build.
-# The caller must give these permissions: contents: read, id-token: write.
+# The caller must give these permissions: contents: write, id-token: write.
+# (contents: write is for the job record. It attaches the production marker to the GitHub release.)
 # The caller must pass its secrets with "secrets: inherit". The README gives the reason.
+#
+# WARNING: Merge this change only AFTER the four callers (lab-svc-core, lab-svc-catalogue, lab-svc-account and lab-web)
+# give contents: write to redeploy.yml. A called workflow cannot ask for more permission than its caller gives.
+# Before this change the four callers gave only contents: read and id-token: write.
+# If this change is merged first, every redeploy fails at the start, also a rollback.
 #
 # A redeploy to Test takes the Test lock, like a release. A redeploy to Staging or Production waits for the job
 # that deploys to that environment in the same repository: both use the concurrency group deploy-<environment>.
@@ -12,6 +18,8 @@ name: redeploy
 #     A rollback restores code, not data. The floor is the oldest version that can still read the data. The message is
 #     "Rollback refused". The check runs after the Test lock and before the deployment, so a refused redeploy changes nothing.
 # A redeploy may go back to an older version, and it does not stop for the tested set. The README explains why.
+# After a successful redeploy to Production, the job record attaches the production marker to the release of the version
+# that was deployed. The contract check of a pull request finds the release that runs in Production by the marker.
 on:
   workflow_call:
     inputs:
@@ -95,6 +103,8 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    outputs:
+      service: ${{ steps.info.outputs.service }}
     env:
       TAG: ${{ needs.check.outputs.tag }}
     steps:
@@ -184,3 +194,27 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
       - uses: jross24/lab-workflows/actions/lock-release@main
+
+  # Records that the version runs in Production now. It attaches the production marker (deployed-production.json) to the
+  # GitHub release of the version that this redeploy deployed. A redeploy can go back to an older version. The marker is
+  # uploaded again on that older release, so that release has the newest marker, and the contract check of a pull request
+  # compares with it. The README section "Contract tests" explains this.
+  # The job runs only for Production, and only if the job redeploy passed. That includes the smoke check.
+  # It has no environment, so it needs no approval. It needs no AWS login.
+  # It needs contents: write, and the caller must give it. See the warning at the top of this file.
+  record:
+    needs: [check, redeploy]
+    if: ${{ !cancelled() && inputs.environment == 'production' && needs.redeploy.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      # The commit is empty on purpose. A redeploy runs from the default branch, so its own commit is not the commit of the
+      # version. The action reads the commit of the tag.
+      - uses: jross24/lab-workflows/actions/record-production@main
+        with:
+          service: ${{ needs.redeploy.outputs.service }}
+          version: ${{ needs.check.outputs.version }}
+          tag: ${{ needs.check.outputs.tag }}
+          token: ${{ github.token }}
