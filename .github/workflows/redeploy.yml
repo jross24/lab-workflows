@@ -37,7 +37,7 @@ permissions: {}
 jobs:
   # A job that names an environment that does not exist creates it. So this job checks the name first.
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.inputs.outputs.version }}
       tag: ${{ steps.inputs.outputs.tag }}
@@ -74,7 +74,7 @@ jobs:
   lock:
     needs: [check]
     if: ${{ inputs.environment == 'test' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: test
     timeout-minutes: 25
     permissions:
@@ -94,7 +94,7 @@ jobs:
   redeploy:
     needs: [check, lock]
     if: ${{ !cancelled() && needs.check.result == 'success' && (needs.lock.result == 'success' || needs.lock.result == 'skipped') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: ${{ inputs.environment }}
     timeout-minutes: ${{ inputs.environment == 'production' && 40 || inputs.environment == 'staging' && 25 || 15 }}
     concurrency:
@@ -181,7 +181,7 @@ jobs:
   unlock:
     needs: [check, lock, redeploy]
     if: ${{ always() && needs.lock.result != 'skipped' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: test
     timeout-minutes: 5
     permissions:
@@ -205,7 +205,7 @@ jobs:
   record:
     needs: [check, redeploy]
     if: ${{ !cancelled() && inputs.environment == 'production' && needs.redeploy.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write
