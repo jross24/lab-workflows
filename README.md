@@ -9,7 +9,7 @@ The pipeline has reusable workflows and several composite actions.
 | --- | --- |
 | `.github/workflows/pr.yml` | Checks a pull request: lint, typecheck, tests, `cdk synth`, a dependency check, a secret scan, `actionlint`, the contract check and the `cdk diff` comment. Only the diff job has AWS access, and it can only read. |
 | `.github/workflows/release.yml` | Releases a push to `main`: version tag, one build, then Test (with the lock and the E2E gate), Staging and Production. Each environment has checks before the deployment and a smoke check after it. After Production it records the version on the release (the production marker). |
-| `.github/workflows/redeploy.yml` | Deploys an old release again. This is the rollback path. It takes the Test lock for Test. |
+| `.github/workflows/redeploy.yml` | Deploys an old release again. This is the rollback path. It takes the Test lock for Test. After a redeploy to Production it records the version on the release (the production marker). |
 | `.github/workflows/check.yml` | A dry run of the checks before a deployment. It deploys nothing. |
 | `actions/pipeline-info` | Reads `pipeline.json` of the service repository and gives the name of the service. |
 | `actions/preflight` | The checks before a deployment: the providers, the tested set, "no step back" and the rollback floor. The script and its tests are in the same folder. |
@@ -119,6 +119,7 @@ Each job that waits for something outside the runner has a `timeout-minutes` lim
 | `record-production` | 5 minutes | A job of a few seconds. It uploads one small file. |
 | `redeploy` (in `redeploy.yml`) | 15, 25 or 40 minutes | For Test, Staging or Production. The same limits as the release jobs. |
 | `lock` (in `redeploy.yml`) | 25 minutes | The wait for the Test lock is 20 minutes at most. |
+| `record` (in `redeploy.yml`) | 5 minutes | A job of a few seconds. It uploads one small file. |
 
 A service can release with CodeDeploy: the traffic of a Lambda alias moves to the new version in steps, and an alarm rolls it back.
 CloudFormation waits for the CodeDeploy deployment, so the job `cdk deploy` waits too. A canary of "10 percent for 5 minutes" alone takes 5 minutes.
@@ -398,6 +399,7 @@ A redeploy follows the same rules as a release in these places:
 - **The rollback floor.** A redeploy stops when its version is older than the rollback floor of the environment. The check reads the SSM parameter `/lab/<service>/min-rollback-version` and fails with `Rollback refused`. It runs before the deployment, and for Test after the lock, so a refused redeploy changes nothing. A service with no such parameter has no floor. See "The rollback floor" and "Rollback and data".
 - **`pipeline.json`.** A tag from before the checks has no such file. Then the redeploy reads the file of the default branch and says so in a notice.
 - **The smoke check.** A redeploy to Staging or Production runs the smoke subset after the deployment, for the version that it deployed. A redeploy to Test does not, because Test has the full suite in the release.
+- **The production marker.** After a redeploy to Production, the job `record` attaches the marker `deployed-production.json` to the release of the version that it deployed. It runs only if the job `redeploy` passed, so a failed smoke check leaves no marker. The job needs no approval and no AWS access. It needs `contents: write`, and so the caller must give it. A redeploy to Test or Staging writes no marker. See "Contract tests".
 
 ## Rollback and data
 
@@ -503,7 +505,7 @@ on:
         type: choice
         options: [test, staging, production]
 permissions:
-  contents: read
+  contents: write # the job record attaches the production marker to the release
   id-token: write
 jobs:
   redeploy:
@@ -1166,7 +1168,7 @@ The job needs the contract and the expectations of the version that runs in Prod
 3. It picks the release whose marker has the newest `updated_at`.
 4. It downloads `contract.json` or `expectations.json` of that release with `gh api -H 'Accept: application/octet-stream' repos/<owner>/<repository>/releases/assets/<id>`.
 
-The newest marker wins, and not the newest version. A redeploy to Production must upload the marker again, with `--clobber`, on the release that it deploys. Then after a rollback the older release has the newest marker. The workflow `redeploy.yml` does not do this yet (see "The production marker").
+The newest marker wins, and not the newest version. A redeploy to Production uploads the marker again, with `--clobber`, on the release that it deploys. So after a rollback the older release has the newest marker.
 Version `0.9.0` is newer than `0.8.0`. If a rollback puts `0.8.0` in Production again, the check compares with `0.8.0`.
 
 | Release | Marker uploaded | Production runs |
@@ -1190,6 +1192,7 @@ The marker is a plain file next to the files that the check needs. It keeps the 
 
 The job `record-production` of `release.yml` writes the marker. It runs after `deploy-production` succeeded. It needs no AWS access and no approval.
 The job calls the action `actions/record-production`. The action writes the file and runs `gh release upload <tag> deployed-production.json --clobber`. The job has the permission `contents: write` and no other.
+The job `record` of `redeploy.yml` does the same after a successful redeploy to Production. It writes the marker on the release of the version that it deployed.
 
 The file holds the facts of the deployment:
 
@@ -1200,7 +1203,7 @@ The file holds the facts of the deployment:
 The marker has limits:
 
 - **A failed smoke check leaves no marker.** The smoke check is a step of the job `deploy-production`. If it fails, the job fails and `record-production` does not run. The new version is live then, but the release has no marker. The check still compares with the release that has the newest marker, and so it is one version behind. A later successful release closes the gap.
-- **A redeploy does not write a marker yet.** After a rollback with `redeploy.yml`, the check compares with the release that the rollback left, and not with the release that runs now.
+- **A failed smoke check in a redeploy leaves no marker either.** The job `record` of `redeploy.yml` runs only if the job `redeploy` passed.
 - **A late re-run moves the marker back.** The time of the upload counts. If a person re-runs `record-production` of an old release after a newer release reached Production, the old release has the newest marker. Re-run the job only right after the deployment.
 - **The marker says "the deployment job passed".** It does not say "the service works". The smoke check covers that.
 - **Old releases have no marker.** Until a release with a marker reaches Production, the check writes notices and compares nothing.
@@ -1511,6 +1514,10 @@ The job `supersede` sees only runs with the status `waiting`. An older run that 
 ### The migration
 
 The rules need the caller to give `actions: write` and to have no workflow-level group. A caller with `permissions` that lack `actions: write` makes the run fail at the start, because a called workflow cannot ask for more than its caller gives. Change the callers first, then change this repository.
+
+The same lesson holds for `redeploy.yml`. Its job `record` asks for `contents: write`. The four callers gave only `contents: read` and `id-token: write` to `redeploy.yml`.
+A called workflow that asks for more than its caller gives fails at the start, also when the job that asks for it is skipped. Every redeploy would fail, and so would a rollback.
+So the change of `redeploy.yml` waited until the four callers gave `contents: write`.
 
 ## Why the references use `@main`
 
