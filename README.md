@@ -131,7 +131,7 @@ If the suite fails, `deploy-staging` does not start, so the release stops.
 
 `e2e-summary` writes the exact versions that the suite tested into the summary of the release.
 The summary of the E2E job itself also lists them, with the commit of lab-e2e.
-When the suite fails, the called workflow still gives its outputs to `e2e-summary`. The lab checked this on 2026-10-08 with a test workflow, and in the failed drill run that the section "What is proven" lists.
+When the suite fails, the called workflow still gives its outputs to `e2e-summary`. The lab checked this on 2026-10-08 with a test workflow, and in a release run that the fault drill failed on purpose ([account 0.4.10, attempt 1](https://github.com/jross24/lab-svc-account/actions/runs/37771702730)). There the log of `e2e-summary` shows `E2E against Test: failure` and the four versions.
 `e2e-summary` writes "not recorded" for an empty output anyway, for example when the suite never ran.
 
 ### The input `run-e2e`
@@ -333,7 +333,7 @@ The column "How" says how the lab proved a claim:
 | A neighbour that is older than the tested set stops a release (issue 21) | Real run ([account 0.4.8](https://github.com/jross24/lab-svc-account/actions/runs/37768086830), attempt 1) | web 0.4.2 was held at the production gate. The account release was tested next to it. Its production job failed with `Missing release` and did not deploy. |
 | The same release goes on when the missing release is in the environment (issue 21) | Real run (the same run, attempt 2) | After web 0.4.2 reached Production, "Re-run failed jobs" passed the check (`web 0.4.2 / 0.4.2 ok: the same version`) and deployed. |
 | A failed suite stops `deploy-staging` and the lock is released (issue 20) | Real run ([account 0.4.3](https://github.com/jross24/lab-svc-account/actions/runs/37761504619), the drill `full-test`) | The suite failed on purpose. `unlock-test` passed. `deploy-staging`, `supersede` and `deploy-production` were skipped. The lock was held from 10:09:33 to 10:12:29 and then gone. |
-| A failed called workflow gives its outputs to the caller | Experiment, and the run above | Yes. This was not clear from the documentation. |
+| A failed called workflow gives its outputs to the caller | Experiment, and a real run ([account 0.4.10, attempt 1](https://github.com/jross24/lab-svc-account/actions/runs/37771702730), drill `full-test`) | Yes. The job `e2e-summary` printed the four versions after the suite failed. This was not clear from the documentation. |
 | A cancel during `e2e` still runs `unlock-test` (issue 20) | Real run ([account 0.4.5](https://github.com/jross24/lab-svc-account/actions/runs/37763451461)) | Cancelled at 10:29:08. The suite ended at 10:29:44. `unlock-test` ran and passed. The lock was gone at 10:29:53. Everything after the suite was cancelled. |
 | "Re-run failed jobs" after a failed suite takes the lock again, and `unlock-test` runs again (issue 19) | Real run (the run of 0.4.3, attempt 2) | The holder text ended with `#2` from 10:13:45 to 10:14:40. Then the release went on to Staging. |
 | A re-run meets a lock that another run holds: the step fails and says what to do | Real run ([account 0.4.10](https://github.com/jross24/lab-svc-account/actions/runs/37771702730), attempt 2) | `The Test environment is locked, and this step does not wait.` The lock was held by a web release. Attempt 3 passed after the web release had ended. |
