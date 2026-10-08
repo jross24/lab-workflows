@@ -23,3 +23,64 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npx cdk synth --quiet
+
+  # --- The scans: dependencies, secrets and actionlint (lab-platform#22 and lab-platform#30) ---
+  # Each job asks for read access to the contents only. The jobs need nothing more.
+  # They use the actions of this repository with @main, like release.yml. The README explains why.
+
+  # Fails when the pull request adds or changes a dependency with a known vulnerability of severity high or critical.
+  # It compares the dependency graph of the base with the one of the head, so a finding that was already in the
+  # base (for example lab-platform#15) does not fail it. It needs no checkout and no install.
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          fail-on-scopes: runtime, development
+          license-check: false
+          show-patched-versions: true
+
+  # Fails when a commit of the pull request has a secret. It scans only the commits of the pull request.
+  # It never prints the value of a secret.
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jross24/lab-workflows/actions/install-tool@main
+        with:
+          tool: gitleaks
+      - uses: jross24/lab-workflows/actions/secret-scan@main
+
+  # Runs actionlint on the workflow files when the pull request changes something under .github/.
+  # Otherwise the job passes and prints a notice that it skipped the check.
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: changes
+        uses: jross24/lab-workflows/actions/changed-paths@main
+        with:
+          paths: .github/
+          label: actionlint
+      - if: steps.changes.outputs.changed == 'true'
+        uses: jross24/lab-workflows/actions/install-tool@main
+        with:
+          tool: actionlint
+      - if: steps.changes.outputs.changed == 'true'
+        run: actionlint
