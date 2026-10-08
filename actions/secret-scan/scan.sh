@@ -80,9 +80,11 @@ main() {
     exit 2
   fi
 
-  local findings
+  local findings count
   findings="$(summarize_report < "$report")"
+  count="$(printf '%s\n' "$findings" | grep -c . || true)"
   rm -rf "$work"
+  echo "::error title=secret scan::${count} possible secret(s) in the commits of this pull request. The values are not printed. Read the job log."
   echo
   echo 'secret-scan: possible secrets in this pull request. The values are not printed.'
   echo "$findings"

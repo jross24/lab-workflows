@@ -131,6 +131,7 @@ else
   out="$(scan "$base" "$head_leak")"
   contains 'a leaked key exits 1' 'exit=1' "$out"
   contains 'the report names the rule' 'generic-api-key' "$out"
+  contains 'a leak makes an error annotation for the job page' '::error title=secret scan::1 possible secret(s)' "$out"
   contains 'the report names the file and the line' 'config.txt:1' "$out"
   contains 'the report names the commit' "commit ${head_leak:0:7}" "$out"
   lacks 'the output has no part of the secret (first half)' "q8Zr3KpL0xVd" "$out"
