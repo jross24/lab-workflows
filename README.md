@@ -22,6 +22,9 @@ The pipeline has reusable workflows and several composite actions.
 | `actions/lock-release` | Releases that lock. It never fails the release. |
 | `actions/install-tool` | Installs a tool from a pin: a version, a url and a SHA-256. It checks the download before it uses it. |
 | `actions/changed-paths` | Tells whether a pull request changes a file under some paths, for example `.github/`. |
+| `.github/workflows/dependency-audit.yml` | Runs `npm audit` each week on the lockfile of `main` of each lab repository. It opens one issue, or comments on it, for an advisory that nobody accepted. See "Scheduled checks". |
+| `.github/workflows/tool-pins.yml` | Compares the pins of `actions/install-tool/tools.txt` with the latest releases each month. It opens one issue, or comments on it, for a pin that is behind. It changes no pin. See "Scheduled checks". |
+| `actions/dependency-audit`, `actions/tool-pins`, `actions/tracking-issue` | The scripts and the tests behind the two scheduled workflows. `tracking-issue` keeps the one open issue of a check. |
 | `.github/workflows/diff.yml` | Shows the `cdk diff` against Production as one comment on a pull request, and blocks a delete of a stateful resource. See "The cdk diff comment". |
 | `actions/cdk-diff` | The scripts and the tests behind `diff.yml`. |
 | `.github/workflows/preview.yml` | Deploys a temporary environment for a pull request with the label `preview`, and removes it when the pull request closes. See "The temporary environment of a pull request". |
@@ -1731,10 +1734,101 @@ These are: a download that the person made, the checksums file of the release, a
 To add or change a tool, edit `tools.txt` and run `bash actions/install-tool/test.sh`.
 The CI of this repository downloads both tools on each run. So a wrong hash or a wrong url fails the CI.
 
+## Scheduled checks
+
+Two workflows in this repository run on a timer. They watch for two things that no pull request changes: a new advisory against a lockfile that stays the same, and a tool pin that falls behind its tool.
+Each check keeps one open issue and nothing else. A check never changes a file, a pin or a dependency.
+The owner asked for them in [lab-platform#38](https://github.com/jross24/lab-platform/issues/38).
+
+### The dependency audit
+
+The job `dependencies` of `pr.yml` compares the base with the head of a pull request. It sees only what the pull request changes.
+When a new advisory appears for a package that is already in a lockfile, no pull request exists, so no check fails. Dependabot sends a notice to the owner, but the repositories keep no record.
+The workflow `dependency-audit.yml` adds that record.
+
+It runs on Monday at 05:17 UTC, and on `workflow_dispatch`. One run goes through these steps:
+
+1. It reads `package.json` and `package-lock.json` of the default branch (`main`) of each repository through the GitHub API. The repositories are public, so the default token of the run can read them. It needs no clone and no install.
+2. It runs `npm audit --package-lock-only --json` in a temporary folder. npm asks the registry about the packages of the lockfile.
+3. It makes one finding for each advisory, under the package that the advisory is about. A package that is vulnerable only because it uses another vulnerable package does not count the advisory again.
+4. It drops the findings below the minimum severity (`moderate` by default). It also drops the advisories of `accepted-advisories.json` that have not expired. The script is `actions/accepted-advisories`, the same one that the pull request check uses.
+   An expired or incomplete entry gives a warning, and its advisory is a finding again.
+5. It keeps the one issue (see "How the one issue works").
+
+A repository without a `package-lock.json` is skipped with a notice. `lab-workflows` is in the list for this reason: it has no lockfile today, but a later lockfile would be audited without a change to the workflow.
+If the audit of a repository fails (for example the registry does not answer), the run fails and the log names the repository. The other repositories are still reported. A failed audit never looks like a clean one.
+
+The `workflow_dispatch` run has three inputs:
+
+| Input | Default | What it does |
+| --- | --- | --- |
+| `repositories` | empty | Repository names, separated by spaces. Empty means all lab repositories. |
+| `min-severity` | `moderate` | The lowest severity that the audit reports: `info`, `low`, `moderate`, `high` or `critical`. |
+| `dry-run` | `false` | Writes nothing. The log shows the issue or the comment that the run would write. |
+
+To audit one more repository, add its name to the default of `REPOSITORIES` in `dependency-audit.yml`.
+The pull request check fails at `high`. The audit reports from `moderate`, because Dependabot reports from `low`, and a record that stops at `high` would miss the advisories that the owner already sees.
+
+### Where the issue lives
+
+The issue is in `jross24/lab-workflows`, the repository of the run. The default token of a workflow can write only to the repository of its run.
+To write to `lab-platform`, the workflow would need a personal access token or a GitHub App, and the lab has neither. The owner decided to add no secret.
+
+A caller in `lab-platform` would put the issues there. It would still use the default token of that repository. But `deploy.yml` of `lab-platform` runs on each push to `main`, so a merge of the caller would start a deployment of the Platform stack.
+The lab did not take that cost. This repository has no release, so a change to these workflows starts none.
+
+### How the one issue works
+
+The check must not open a new issue each week for the same advisory. So it follows three rules:
+
+1. The body of the issue starts with a hidden marker, `<!-- dependency-audit -->`. Only an open issue that the bot `github-actions[bot]` wrote counts. A person cannot hijack the issue with the same marker.
+2. Each finding has a key, `repository:package:advisory`. The body of the issue and each comment of the bot end with a hidden line, `<!-- dependency-audit-keys: key key -->`, that lists the keys they hold.
+3. A finding with a key in no hidden line is new. A new finding makes a comment on the open issue. If no issue is open, it makes the issue.
+
+So a second run with the same findings writes nothing. The same advisory in one more repository is a new finding and makes one comment.
+The comment lists the new findings first and then all open findings.
+
+When a person closes the issue, the next run starts a new round: it opens a new issue for the findings that remain. To silence a finding for good, fix the dependency, or add the advisory to `accepted-advisories.json` (see "Accepted advisories: a short list with dates").
+If no finding remains but the issue is open, the run writes a line in the log and leaves the issue. A person closes it.
+
+### The tool pins
+
+`actions/install-tool/tools.txt` pins each tool that the pipeline downloads. Dependabot does not read that file, so a pin does not update itself.
+The workflow `tool-pins.yml` runs on the first day of each month at 05:41 UTC, and on `workflow_dispatch`.
+
+For each tool, the script takes the repository from the url of the pin (`https://github.com/<owner>/<repository>/releases/download/...`). It asks GitHub for the latest release of that repository.
+GitHub does not count a draft or a pre-release as the latest. The script compares the numbers of the two versions, one by one, so `1.10` is newer than `1.9`.
+A pin that is older makes a finding. A pin that is newer than the latest release only gets a notice in the log.
+
+The check never changes a pin. A pin holds a version, a url and a hash that must change together, and a person must check the hash. The issue says so and names the file.
+If the script cannot compare a pin, the run fails and names the tool. Examples are a url that is not a GitHub release, a tag such as `nightly`, or an answer of GitHub that is an error. A pin that is silently skipped would defeat the check.
+
+The issue works like the one of the audit, with the marker `<!-- tool-pins -->` and the key `tool:pinned-version:latest-version`. When a newer release appears for a tool that is still behind, the key changes and the run adds a comment.
+
+The `workflow_dispatch` run has two inputs: `pins-file` (default `actions/install-tool/tools.txt`) and `dry-run`.
+A test can point `pins-file` at `actions/tool-pins/fixtures/tools-behind.txt`. The pins in the fixtures are old on purpose, and their hashes are not real. No workflow installs from them.
+
+### Tests
+
+The scripts need no package. The tests use fakes for `gh`, for the files of GitHub and for `npm audit`, so they use no network and no clock.
+
+```sh
+node --test actions/tracking-issue/lib.test.mjs actions/dependency-audit/lib.test.mjs actions/dependency-audit/cli.test.mjs \
+  actions/tool-pins/lib.test.mjs actions/tool-pins/cli.test.mjs
+```
+
+The folder `actions/dependency-audit/fixtures` holds real `npm audit` output (the advisory `GHSA-q2hr-2g5m-vwhr` against `brace-expansion`) and made-up reports for a transitive finding, a clean lockfile and an npm error.
+To see what a run would do without a write, log in with `gh auth login` and run, for example:
+
+```sh
+DRY_RUN=true ISSUE_REPO=jross24/lab-workflows REPOSITORIES="lab-web lab-flags" node actions/dependency-audit/cli.mjs run
+DRY_RUN=true ISSUE_REPO=jross24/lab-workflows node actions/tool-pins/cli.mjs run
+```
+
 ## Checks of this repository
 
 The `ci` workflow runs on each pull request. It installs `actionlint` and `gitleaks` with `actions/install-tool`.
-It runs the tests of the scripts: next-version, lock, preflight, supersede, propose-rollback, install-tool, changed-paths and secret-scan. It also runs the tests of the Node scripts for the diff comment, the preview, the contract check and the accepted advisories. The new tests need `jq`, which the runner image has. It also runs `shellcheck` and `actionlint`.
+It runs the tests of the scripts: next-version, lock, preflight, supersede, propose-rollback, install-tool, changed-paths and secret-scan. It also runs the tests of the Node scripts for the diff comment, the preview, the contract check and the accepted advisories, and the tests of the scheduled checks (see "Scheduled checks"). The new tests need `jq`, which the runner image has. It also runs `shellcheck` and `actionlint`.
 The step "check the list of accepted advisories" fails when an entry of `accepted-advisories.json` is past its date or lacks a field.
 
 `actionlint` is not optional. It checks every workflow file in `.github/workflows/`, and it runs `shellcheck` on the `run:` scripts.

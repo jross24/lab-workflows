@@ -1,0 +1,67 @@
+name: dependency-audit
+
+# A weekly `npm audit` of the lockfile of the default branch (main) of each lab repository that has one.
+# The pull request check "dependencies" sees only what a pull request changes. A new advisory against a lockfile that
+# nobody changes is invisible to it. This workflow closes that gap and leaves a record.
+#
+# It reads package.json and package-lock.json through the GitHub API, so it needs no clone and no install.
+# It skips the advisories of accepted-advisories.json that have not expired (the same list as the pull request check).
+# It keeps ONE open issue: it opens the issue for a new finding, and comments on the open issue for a later finding.
+# It never opens a second issue for a finding that the open issue already holds.
+#
+# The issue is in this repository (the repository of the run). The default token of a workflow can write only there,
+# and the lab has no other token. The README section "Scheduled checks" explains the choice.
+#
+# There is one workflow here, and no caller in the service repositories. So a change to a service repository starts no release.
+# To add a repository, add its name to the default of REPOSITORIES below.
+on:
+  schedule:
+    # Monday, 05:17 UTC.
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      repositories:
+        description: Repository names, separated by spaces. Leave it empty to audit all lab repositories.
+        type: string
+        required: false
+        default: ''
+      min-severity:
+        description: The lowest severity that the audit reports.
+        type: choice
+        options: [info, low, moderate, high, critical]
+        default: moderate
+      dry-run:
+        description: Write nothing. Print the issue or the comment that the run would write.
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+# Two runs at the same time could each open an issue. A running audit is never cancelled.
+concurrency:
+  group: dependency-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: audit the lockfiles and keep the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORIES: ${{ inputs.repositories || 'lab-platform lab-e2e lab-workflows lab-flags lab-svc-core lab-svc-catalogue lab-svc-account lab-web' }}
+          MIN_SEVERITY: ${{ inputs.min-severity || 'moderate' }}
+          DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node actions/dependency-audit/cli.mjs run
