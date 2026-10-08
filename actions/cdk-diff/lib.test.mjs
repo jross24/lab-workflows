@@ -392,6 +392,21 @@ describe('renderComment', () => {
     assert.doesNotMatch(body, /<details>/);
   });
 
+  it('leaves out the details block when the CLI only says that there were no differences', () => {
+    const diff = 'Stack A (a)\nThere were no differences';
+    const body = renderComment({ ...base, summary: { add: 0, change: 0, replace: 0, delete: 0 }, diff });
+    assert.match(body, /No change/);
+    assert.doesNotMatch(body, /<details>/);
+  });
+
+  it('keeps the details block when only an output or a parameter differs', () => {
+    const diff = 'Stack A (a)\nOutputs\n[~] Output A/Version Version: {"Value":"1"} to {"Value":"2"}';
+    const body = renderComment({ ...base, summary: { add: 0, change: 0, replace: 0, delete: 0 }, diff });
+    assert.doesNotMatch(body, /\*\*No change/);
+    assert.match(body, /<details>/);
+    assert.match(body, /Output A\/Version/);
+  });
+
   it('removes every account ID from the whole comment', () => {
     const body = renderComment({
       ...base,

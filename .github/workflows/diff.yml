@@ -59,6 +59,9 @@ on:
 # Each job asks for its own permissions.
 permissions: {}
 
+# The artefact names hold the key. A caller can call this workflow more than once in a run (one call for each account),
+# and the name of an artefact must be unique in a run.
+
 # A new push replaces the run of the old commit. Two runs could write the comment at the same time.
 concurrency:
   group: cdk-diff-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ inputs.key }}
@@ -134,7 +137,9 @@ jobs:
               text = text.replace(/(?<![0-9A-Za-z])[0-9]{12}(?![0-9A-Za-z])/g, "[account-id]");
               fs.writeFileSync(file, text);
             ' "deployed/${name}.json" "$ACCOUNT_ID"
-            version="$(jq -r '[.Stacks[0].Outputs[]? | select(.OutputKey == "Version") | .OutputValue][0] // empty' describe.json)"
+            # The version comes from the template that the diff uses, and not from the stack outputs.
+            # While a deployment runs, the template can be newer than the outputs.
+            version="$(jq -r '.Outputs.Version.Value // empty | select(type == "string")' "deployed/${name}.json")"
             meta="$(jq -c --arg name "$name" --arg version "$version" \
               '. + [{name: $name, deployed: true, version: (if ($version | length) > 0 then $version else null end)}]' <<< "$meta")"
           done
@@ -142,7 +147,7 @@ jobs:
           rm -f describe.json describe.err
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: deployed
+          name: deployed-${{ inputs.key }}
           path: deployed
           retention-days: 1
           if-no-files-found: error
@@ -172,7 +177,7 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: deployed
+          name: deployed-${{ inputs.key }}
           path: deployed
       - name: synthesise and compare
         env:
@@ -183,7 +188,7 @@ jobs:
         run: bash .lab-tools/actions/cdk-diff/compute.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: diff
+          name: diff-${{ inputs.key }}
           path: diff
           retention-days: 1
           if-no-files-found: error
@@ -204,7 +209,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: diff
+          name: diff-${{ inputs.key }}
           path: diff
       - name: post the comment
         env:

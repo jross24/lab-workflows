@@ -1,0 +1,261 @@
+name: preview
+
+# A temporary environment for a pull request. The label "preview" deploys the Dev stage of the service into the
+# developer account, under a name that belongs to this pull request. A push deploys the new commit. A closed pull
+# request, or a removed label, removes it. The README section "The temporary environment of a pull request" explains
+# the design and the security model.
+#
+# The caller runs this workflow for these pull request events: opened, reopened, synchronize, labeled, unlabeled, closed.
+# The caller must give these permissions: contents: read, id-token: write, pull-requests: write.
+# The caller must pass its secrets with "secrets: inherit", and it needs the repository secret PR_ACCOUNT_ID_DEV.
+# The caller should use a concurrency group for each pull request, so two events do not deploy at the same time.
+#
+# The jobs:
+#   plan     decides what the event means: deploy, destroy or nothing.
+#   build    runs the CODE OF THE PULL REQUEST (npm ci, cdk synth). It has no AWS credentials and no write token.
+#   deploy   has the role github-preview. It deploys the cloud assembly of the build job.
+#   destroy  has the role github-preview. It runs no code of the pull request.
+#   comment  has the right to write the one comment. It runs no code of the pull request.
+on:
+  workflow_call:
+    inputs:
+      smoke-path:
+        description: The path of the preview URL that must answer HTTP 200 after the deployment.
+        type: string
+        required: false
+        default: /products
+      tools-ref:
+        description: The ref of lab-workflows that the scripts come from. Leave the default. A test of a branch sets it.
+        type: string
+        required: false
+        default: main
+
+# Each job asks for its own permissions.
+permissions: {}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      action: ${{ steps.plan.outputs.action }}
+      namespace: ${{ steps.plan.outputs.namespace }}
+      stack: ${{ steps.plan.outputs.stack }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jross24/lab-workflows
+          ref: ${{ inputs.tools-ref }}
+          persist-credentials: false
+      - id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          ACCOUNT_ID: ${{ secrets.PR_ACCOUNT_ID_DEV }}
+          REPOSITORY: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: node actions/preview/cli.mjs plan
+
+  # The only job that runs the code of the pull request. It makes the cloud assembly and nothing else.
+  build:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.action == 'deploy' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jross24/lab-workflows
+          ref: ${{ inputs.tools-ref }}
+          path: .lab-tools
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: synthesise the Dev stage under the namespace of the pull request
+        env:
+          NAMESPACE: ${{ needs.plan.outputs.namespace }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: npx cdk synth --quiet --output cdk.out -c dev=true -c "namespace=${NAMESPACE}" -c "version=${VERSION}"
+      # Code that does not know the namespace makes the baseline stack. A deploy would change the baseline.
+      - name: check the stack name of the assembly
+        env:
+          STACK: ${{ needs.plan.outputs.stack }}
+        run: node .lab-tools/actions/preview/cli.mjs check-assembly cdk.out "$STACK"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: preview-cdk-out
+          path: cdk.out
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy:
+    needs: [plan, build]
+    if: ${{ needs.plan.outputs.action == 'deploy' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      url: ${{ steps.url.outputs.url }}
+    steps:
+      # The checkout gives the lockfile, and so the CDK CLI. The CLI of a pull request runs with the credentials below.
+      # That adds nothing to what the template of the pull request can already do, see the README.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jross24/lab-workflows
+          ref: ${{ inputs.tools-ref }}
+          path: .lab-tools
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: preview-cdk-out
+          path: cdk.out
+      - name: check the stack name of the assembly again, before any credential exists
+        env:
+          STACK: ${{ needs.plan.outputs.stack }}
+        run: node .lab-tools/actions/preview/cli.mjs check-assembly cdk.out "$STACK"
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.PR_ACCOUNT_ID_DEV }}:role/github-preview
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - name: cdk deploy
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          npx cdk deploy --app cdk.out "Dev/*" --require-approval never \
+            --outputs-file "$RUNNER_TEMP/cdk-outputs.json" \
+            --tags "lab-preview-repo=${GITHUB_REPOSITORY}" --tags "lab-preview-pr=${PR_NUMBER}"
+      - id: url
+        env:
+          STACK: ${{ needs.plan.outputs.stack }}
+        run: |
+          set -euo pipefail
+          base="$(jq -r --arg stack "$STACK" '.[$stack].ApiUrl // empty' "$RUNNER_TEMP/cdk-outputs.json")"
+          if [[ -z "$base" ]]; then
+            echo "::error::The stack ${STACK} has no output ApiUrl."
+            exit 1
+          fi
+          echo "url=${base%/}" >> "$GITHUB_OUTPUT"
+      # The URL must answer with HTTP 200. The service answers 502 when it cannot call core.
+      - name: smoke test
+        env:
+          URL: ${{ steps.url.outputs.url }}${{ inputs.smoke-path }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors --max-time 30 "$URL" | tee "$RUNNER_TEMP/smoke.json"
+          echo
+          echo "### Preview answered" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`GET ${URL}\` answered HTTP 200." >> "$GITHUB_STEP_SUMMARY"
+
+  destroy:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.action == 'destroy' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.PR_ACCOUNT_ID_DEV }}:role/github-preview
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      # CloudFormation deletes a stack with the role that created it. The deploy role of the bootstrap may delete a stack.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.PR_ACCOUNT_ID_DEV }}:role/cdk-hnb659fds-deploy-role-${{ secrets.PR_ACCOUNT_ID_DEV }}-${{ vars.AWS_REGION }}
+          role-chaining: true
+          # The action tags the new session by default. A tagged session needs sts:TagSession in the trust policy
+          # of the bootstrap role, and that policy does not have it. The first run of destroy failed for this reason.
+          role-skip-session-tagging: true
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - name: remove the stack of this pull request
+        env:
+          STACK: ${{ needs.plan.outputs.stack }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if ! aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].Tags' --output json > tags.json 2> describe.err; then
+            if grep -q "does not exist" describe.err; then
+              echo "Stack ${STACK} does not exist. Nothing to remove."
+              exit 0
+            fi
+            cat describe.err
+            exit 1
+          fi
+          # The name is built from the repository and the number. The tags must agree, so the job never removes another stack.
+          repo_tag="$(jq -r '.[] | select(.Key == "lab-preview-repo") | .Value' tags.json)"
+          pr_tag="$(jq -r '.[] | select(.Key == "lab-preview-pr") | .Value' tags.json)"
+          if [[ "$repo_tag" != "$GITHUB_REPOSITORY" || "$pr_tag" != "$PR_NUMBER" ]]; then
+            echo "::error::Stack ${STACK} is not the preview of this pull request (tags: ${repo_tag} #${pr_tag}). It stays."
+            exit 1
+          fi
+          aws cloudformation delete-stack --stack-name "$STACK"
+          aws cloudformation wait stack-delete-complete --stack-name "$STACK"
+          echo "Stack ${STACK} is removed."
+
+  comment:
+    needs: [plan, deploy, destroy]
+    # A failed build also gives needs.deploy.result == skipped, so the comment says that the preview failed.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.plan.outputs.action == 'deploy' || (needs.plan.outputs.action == 'destroy' && needs.destroy.result == 'success')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jross24/lab-workflows
+          ref: ${{ inputs.tools-ref }}
+          persist-credentials: false
+      - name: post the comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          STACK: ${{ needs.plan.outputs.stack }}
+          COMMIT: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          URL: ${{ needs.deploy.outputs.url }}${{ inputs.smoke-path }}
+          ACCOUNT_IDS: ${{ secrets.PR_ACCOUNT_ID_DEV }}
+          ACTION: ${{ needs.plan.outputs.action }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$ACTION" == "destroy" ]]; then
+            state=destroyed
+          elif [[ "$DEPLOY_RESULT" == "success" ]]; then
+            state=deployed
+          else
+            state=failed
+          fi
+          node actions/preview/cli.mjs comment "$state"
