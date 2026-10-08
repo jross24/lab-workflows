@@ -1,0 +1,40 @@
+{
+  "service": "catalogue",
+  "expects": {
+    "core": {
+      "GET /items": {
+        "sends": [],
+        "responses": {
+          "200": {
+            "type": "object",
+            "required": ["version", "items"],
+            "properties": {
+              "version": { "type": "string" },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["name"],
+                  "properties": {
+                    "name": { "type": "string" },
+                    "price": { "type": "number" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /items/{id}": {
+        "sends": ["path:id"],
+        "responses": {
+          "200": {
+            "type": "object",
+            "required": ["name"],
+            "properties": { "name": { "type": "string" } }
+          }
+        }
+      }
+    }
+  }
+}

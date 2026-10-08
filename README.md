@@ -28,6 +28,8 @@ The pipeline has reusable workflows and several composite actions.
 | `.github/workflows/preview-sweeper.yml` | Removes the previews of closed pull requests and the previews that are too old. It runs every six hours. |
 | `actions/preview` | The scripts and the tests behind the two preview workflows. |
 | `actions/secret-scan` | Scans the commits of a pull request for secrets with `gitleaks`. It never prints a secret. |
+| `actions/contract-check` | Checks the files `contract.json` and `expectations.json` of a service against the releases that run in Production. It needs no AWS access. See "Contract tests". |
+| `actions/contract` | The scripts and the tests behind `contract-check`. |
 
 ## Build once, promote the same artefact
 
@@ -881,7 +883,7 @@ The guarantee has gaps on purpose: a neighbour with no version in the environmen
 It does not guarantee these things:
 
 - It does not test the set in Staging or in Production. It compares version numbers. The smoke subset checks the live system after the deployment, but it is small.
-- It does not know whether a newer neighbour still works with this release. An upper bound in a range of `compatible` has no effect for the same reason. A newer neighbour only gives a notice. The contract tests of [lab-platform#34](https://github.com/jross24/lab-platform/issues/34) are the tool for that.
+- It does not know whether a newer neighbour still works with this release. An upper bound in a range of `compatible` has no effect for the same reason. A newer neighbour only gives a notice. The contract tests (see "Contract tests", and [lab-platform#34](https://github.com/jross24/lab-platform/issues/34)) are the tool for that.
 - It trusts the owner who writes a range in `pipeline.json`.
 - It reads versions from SSM. A parameter that a person changed by hand would give a wrong answer. The role of the pipeline cannot write the parameters, and only the stack writes them.
 - Between the check and the deployment there are a few seconds. Another release of another repository can deploy in that time.
@@ -898,6 +900,312 @@ It also has costs:
 
 The comparison costs one SSM call (a few seconds) in the job that deploys, and no new job, no new approval and no shared release. The price is that the guarantee is weaker. The check shows that the neighbours are not older than the tested ones. It does not run the whole set in Production.
 For a lab with four small services, the comparison is the cheaper choice. A team with many tightly coupled services would choose the unit.
+
+## Contract tests
+
+A contract test catches this fault: service A passes its own tests, but it breaks a service that calls it.
+The check runs on every pull request, before Test. It compares two small files. It needs no deployment and no AWS access.
+
+The tested set (see above) catches a different fault. It compares version numbers when the services promote on their own.
+The contract check compares what a provider promises with what its consumers read.
+
+### The words
+
+| Word | Meaning |
+| --- | --- |
+| Provider | A service that other services call. Core is a provider for catalogue and account. Catalogue and account are providers for web. |
+| Consumer | A service that calls a provider. |
+| Contract | The file `contract.json` of a provider. It says what the provider promises in its answers and what it needs in a request. |
+| Expectations | The file `expectations.json` of a consumer. It says which fields of a provider the consumer really reads. |
+| Production marker | The release asset `deployed-production.json`. It says "this release runs in Production now". |
+
+A service can be a provider and a consumer. Catalogue is both, so it has both files.
+
+### The two files
+
+Both files are in the root of the service repository, next to `pipeline.json`. A person writes them and changes them by hand.
+The examples are in `actions/contract/fixtures/`.
+
+A provider keeps `contract.json`:
+
+```json
+{
+  "service": "core",
+  "consumers": ["catalogue", "account"],
+  "endpoints": {
+    "GET /items": {
+      "request": { "required": [], "optional": ["query:limit"] },
+      "responses": {
+        "200": {
+          "type": "object",
+          "required": ["service", "version", "items"],
+          "properties": {
+            "service": { "type": "string" },
+            "version": { "type": "string" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "name"],
+                "properties": { "id": { "type": "string" }, "name": { "type": "string" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+- `service` must be the `service` of `pipeline.json`.
+- `consumers` is optional. It lists the services that call this provider. The check downloads their expectations.
+- The key of an endpoint is `"<METHOD> <path>"`, for example `GET /items`.
+- `request.required` and `request.optional` list the inputs of a request. An input is `query:<name>`, `header:<name>`, `body:<name>` or `path:<name>`. The authorisation (SigV4) is not listed.
+- `responses` maps a status code to a schema. A status code has 3 digits. The lab lists the success answer (200). A schema for an error answer is optional.
+- `description` is allowed in the file, in an endpoint and in a schema. No check reads it.
+
+A consumer keeps `expectations.json`:
+
+```json
+{
+  "service": "catalogue",
+  "expects": {
+    "core": {
+      "GET /items": {
+        "sends": [],
+        "responses": {
+          "200": {
+            "type": "object",
+            "required": ["version", "items"],
+            "properties": {
+              "version": { "type": "string" },
+              "items": {
+                "type": "array",
+                "items": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+- `expects.<provider>.<endpoint>.sends` lists the request inputs that the consumer sends.
+- A schema in `responses` holds only what the consumer reads. `required` lists the fields that must be there.
+- A field in `properties` but not in `required` is read when it is there. The consumer copes when it is missing.
+- A consumer may list an endpoint without `responses`. Then it only needs the endpoint to exist.
+
+#### The schema subset
+
+A schema is a JSON object. It has only these keywords. Any other keyword is an error with the text `unsupported keyword`. So nobody thinks that the check reads it.
+
+| Keyword | Meaning |
+| --- | --- |
+| `type` | Required. One of `string`, `number`, `integer`, `boolean`, `object`, `array`. |
+| `properties` | For `object`. A map from a name to a schema. |
+| `required` | For `object`. A list of names. Each name must be a key of `properties`. |
+| `items` | For `array`. One schema. |
+| `description` | Text. No check reads it. |
+
+An object may have more properties than the schema lists. The contract is open.
+An `integer` is a valid value where a schema says `number`.
+
+The check also refuses these:
+
+- an unknown key in the file,
+- a request input that does not match the pattern,
+- a status code without 3 digits,
+- a `service` that is not the `service` of `pipeline.json`.
+
+Each error names the file and the place in the file, for example `contract.json: $.endpoints["GET /items"].responses["200"].properties.items.items.properties.id.enum`.
+To check one file on your laptop, run `node actions/contract/cli.mjs validate contract.json`. The command looks for a `pipeline.json` next to the file.
+
+### The release assets
+
+Each GitHub release of a service holds these files next to `cdk-out-<tag>.zip`:
+
+| Asset | What it is |
+| --- | --- |
+| `contract.json` and `expectations.json` | A copy of the file at the released commit. The job `build` attaches a file if the repository has it. |
+| `tested-with.json` | The tested set (see "The tested set"). |
+| `deployed-production.json` | The production marker. A job writes it after a successful deployment to Production. |
+
+The marker holds the service, the version, the tag, the environment, the commit, the URL of the run and the time.
+The check does not read the content. It reads the name of the asset and the time of its upload.
+
+### How the job finds the version in Production
+
+The job needs the contract and the expectations of the version that runs in Production now. A pull request compares with that version, and not with `main`.
+`main` holds changes that no person has released. Production is where a break hurts.
+
+1. The job lists the releases of the repository with `gh api repos/<owner>/<repository>/releases`. It reads all pages. It skips draft releases.
+2. It keeps the releases that have the asset `deployed-production.json`.
+3. It picks the release whose marker has the newest `updated_at`.
+4. It downloads `contract.json` or `expectations.json` of that release with `gh api -H 'Accept: application/octet-stream' repos/<owner>/<repository>/releases/assets/<id>`.
+
+The newest marker wins, and not the newest version. A redeploy to Production uploads the marker again, with `--clobber`, on the release that it deploys. So after a rollback the older release has the newest marker.
+The version of `v0.9.0` is higher than the version of `v0.8.0`. If a rollback put `v0.8.0` in Production, the check compares with `v0.8.0`.
+
+| Release | Marker uploaded | Production runs |
+| --- | --- | --- |
+| `v0.8.0` | 10:00 | `v0.8.0` |
+| `v0.9.0` | 12:00 | `v0.9.0` (the newest marker) |
+| `v0.8.0` after a redeploy | 14:00 | `v0.8.0` (the newest marker again) |
+
+The lab considered four other ways to find the version in Production:
+
+| Other way | Why the lab did not use it |
+| --- | --- |
+| The latest release | A release is the latest before it reaches Production. It can wait for the reviewer or fail its smoke check. A rollback goes to an older release. |
+| The SSM parameter `/lab/<service>/version` | A pull request job has no AWS access, on purpose. The parameter gives a version, but no contract. |
+| A git tag such as `production` that moves | Moving a tag needs a force-push. The tag keeps no history. |
+| The deployment record of the GitHub environment | The record names the commit of the run. A redeploy runs from `main`, so it names the wrong commit. |
+
+The marker is a plain file next to the files that the check needs. It keeps the history, because each release keeps its own copy. A reader can see it in the release page.
+
+### The rules for a provider: B1 to B6
+
+The job compares the contract in the pull request (new) with the contract of the release in Production (old). It walks each endpoint of the old contract.
+
+| Id | Breaking when | The message names |
+| --- | --- | --- |
+| B1 | A property of the old contract is not in the new one. This holds at any depth, also for the items of an array. | The field path, for example `items[].name`. |
+| B2 | The `type` of a property changed. | The field path, the old type and the new type. |
+| B3 | A name in `required` of the old contract is not in `required` of the new one. The field became optional. | The field path. |
+| B4 | A status code of the old contract has no schema in the new one. | The status code. |
+| B5 | An endpoint of the old contract is not in the new one. | The endpoint. |
+| B6 | The new contract requires a request input that the old one did not require. The input is new, or it was optional. | The input. |
+
+One type change is allowed: `number` to `integer`. The new type is narrower, so a reader still copes. The change `integer` to `number` is breaking.
+
+These changes pass:
+
+- a new property, also a new required one,
+- a new endpoint,
+- a new status code,
+- a new optional request input, and an optional input that stays optional,
+- a field that was optional and is required now,
+- the change `number` to `integer`.
+
+The path of a field uses `.` for an object and `[]` for the items of an array. The path `items[].name` means the field `name` in each item of `items`. The path `grid[][].cell` goes through an array of arrays.
+
+### The rules for a consumer: X1 to X5
+
+The job verifies a contract against the expectations of a consumer. It does this in two places:
+
+- A **provider** pull request verifies the new contract against the expectations of each consumer in `consumers`. It uses the expectations from the release of the consumer that runs in Production.
+- A **consumer** pull request verifies the expectations in the pull request against the contract of each provider in `expects`. It uses the contract from the release of the provider that runs in Production.
+
+| Id | Violation | The message names |
+| --- | --- | --- |
+| X1 | The contract has no such endpoint, or it has no schema for an expected status code. | The endpoint and the status code. |
+| X2 | The consumer lists a property in `properties` and in `required`, and the contract does not have it. | The field path. |
+| X3 | A property that the consumer lists is in the contract with another `type`. This holds also for an optional field. | The field path, the expected type and the contract type. |
+| X4 | The consumer lists a field in `required`, but the contract does not list it in `required`. | The field path. |
+| X5 | The contract requires a request input that the consumer does not send. | The input. |
+
+If the consumer lists a property but not in `required`, a missing property is fine (X2 does not apply). The check walks `properties` and `items` to any depth. An `integer` in the contract satisfies a `number` in the expectations.
+
+The two directions give an order for a new field. The provider releases the field first. Then the consumer lists it in `required`, because the production contract has it now. A consumer pull request that needs a field which Production does not have yet fails with X2.
+
+### The label
+
+The label `breaking-change-approved` on a pull request lets B1 to B6 pass. It says "a person knows that this change breaks a contract, and has a plan".
+The summary then says "Approved by label" and lists what the label approved.
+
+The job reads the labels with the API at the time it runs, like the stateful change guard. A re-run sees a new label. The caller does not listen to label events.
+The label has an exact spelling. It must exist in the repository. A person with triage rights can add it.
+
+The label never lets X1 to X5 pass. An X rule says "a consumer that runs in Production reads this, and it will break now". No approval of the provider fixes that. Release the consumer first.
+
+### What the pull request job does
+
+The job `contracts` of `pr.yml` calls `actions/contract-check`. The caller must check out the repository first. The command is `node actions/contract/cli.mjs pr-check`.
+
+1. No `contract.json` and no `expectations.json`: the job writes a notice and passes.
+2. The job parses each file that exists. A format error fails the job. The message names the file and the place in the file.
+3. If `contract.json` exists:
+   1. The job finds the release of this repository that runs in Production. With no marker, it writes the notice "no release is recorded in Production yet" and skips this part. A release with a marker but without a `contract.json` asset gives a notice too.
+   2. It compares with B1 to B6. A violation fails, unless the pull request has the label.
+   3. For each service in `consumers`, it finds the release in Production and downloads `expectations.json`. With no marker or no file it writes a notice and goes on. Otherwise it runs X1 to X5. A violation fails.
+4. If `expectations.json` exists: for each provider in `expects`, it downloads `contract.json` of the release in Production and runs X1 to X5. With no marker or no file it writes a notice and goes on.
+5. The job writes a table to the job summary and one `::error` line for each violation. A line has the rule, the field path and a hint.
+
+This is how the job prints a breaking change (B1) and a consumer that expects a field (X2):
+
+```
+::error title=Breaking change B1 (field removed)::GET /items 200: the field items[].name is in the production contract (core 0.8.0) but not in this pull request. A consumer may read it. Move the consumers to the new field and release them first. Then add the label breaking-change-approved to this pull request and run this job again.
+::error title=Consumer expects a field (X2)::catalogue 0.7.1 (in Production) expects GET /items 200: items[].name. The contract in this pull request does not have it. Release catalogue without that field first.
+```
+
+These cases do not fail the job:
+
+| Case | What the job does |
+| --- | --- |
+| The repository has no contract file | A notice. |
+| No release of the repository, a consumer or a provider has a marker | A notice. The check skips that part. |
+| The release in Production has no `contract.json` or no `expectations.json` | A notice. The consumer "has published nothing". |
+| The file of a released version is not valid, for example a version from before a stricter rule | A warning. A pull request cannot fix a released file, so the check skips it. |
+
+The job fails when `gh` cannot read a release, a file or the labels. The message says to run the job again. A check that passes when it could not look would give false trust.
+
+A pull request from a fork gets a read-only token. The token can read public releases and labels, so the job works for a fork.
+
+#### Text from the files is untrusted
+
+A pull request writes the files. A field name can hold a line break and the text `::error::`. GitHub reads a line that starts with `::` as a workflow command.
+Before the job prints a text from a file, it cleans the text. It replaces control characters with a space and `::` with `:`. It cuts the text at 200 characters and escapes `%`.
+A text for the job summary also gets a backslash before the characters that make markup.
+The names of services are checked with a strict pattern before they go into the name of a repository.
+
+### What the check does not do
+
+- It compares two files. It does not prove that a file is true. If the provider returns a field that its `contract.json` does not list, nothing notices.
+- It checks the shape of an answer: names, types and "must be present". It does not check values, the meaning of a field, the order of calls or the time that a call takes.
+- It does not check a consumer that is not in `consumers`, or a consumer that has not published `expectations.json` yet.
+- It does not check authorisation, events, queues or the data in a table.
+- It compares with Production only. A change that Test or Staging already runs is not the baseline.
+- It does not stop a removed request input. A provider that stops to accept an input does not break a consumer that still sends it.
+- It does not run a request. The tested set, the end-to-end suite and the smoke check do that.
+
+### The trade-offs
+
+- **Files by hand.** A person must keep `contract.json` and `expectations.json` true. The gain is a check that is cheap, offline and easy to read in a pull request. A test in the service repository can close the gap. It validates a real answer of the handler against the contract, or it makes the expectations from the code that reads the answer.
+- **Two files, not one.** The provider says what it promises. The consumer says what it reads. A provider may add fields freely, and a consumer lists only the fields it needs. The cost is a second file in each consumer.
+- **Production as the baseline.** The check protects what runs now. The price is that a change can pass while an unreleased consumer in Test still reads the old field. The tested set and the end-to-end suite cover that case.
+- **A label for B, no label for X.** A provider owner can accept a break of a contract that nobody uses. The owner cannot accept the break of a consumer that reads the field now.
+- **The newest marker.** The rule is simple and it follows rollbacks. It trusts the upload time of the asset. A failed smoke check in Production leaves no marker. The version is live, but the check does not know it.
+- **No contract tool such as Pact.** A tool like that brings a library to each repository and, in most set-ups, a broker service. Two small files and `gh` give the main gain for four services.
+
+### What a service repository must add
+
+1. A provider adds `contract.json`. A consumer adds `expectations.json`. A service that is both adds both. The file `pipeline.json` must exist already.
+2. The label `breaking-change-approved` in the repository.
+3. The required check `pr / contracts` in the branch protection or the ruleset of `main`.
+4. A release after the files exist. The release attaches the files, and the first deployment to Production writes the marker. Until then the check writes notices.
+5. Optional: a unit test that validates a real answer of the handler against `contract.json`.
+
+The caller `pr.yml` needs no change. It gives `pull-requests: write` for the diff comment already, and the job `contracts` asks only for `contents: read` and `pull-requests: read`.
+
+### What is proven
+
+The unit tests in `actions/contract` cover these cases:
+
+- each rule B1 to B6 and X1 to X5,
+- the changes that must pass, and nested arrays,
+- the label for B, and no label for X,
+- no marker, a marker without an asset, and a consumer without expectations,
+- a format error, an unsupported keyword and a hostile field name,
+- two releases with markers.
+
+Run them with `node --test actions/contract/lib.test.mjs actions/contract/cli.test.mjs`.
+
+The lab ran `findProductionRelease` and `fetchAsset` for real on 2026-10-08 against the public repositories lab-svc-core, lab-svc-catalogue and lab-web. The test used the asset `tested-with.json` in place of the marker, because no release had a marker yet.
+The listing found the release with the newest asset. The download with `gh api -H 'Accept: application/octet-stream'` gave the exact text of the file. A repository that does not exist gave `gh: Not Found (HTTP 404)`.
+`gh release download <tag> --pattern <name> --output -` gave the same text. The lab uses `gh api` with the asset id, because the id comes from the listing and needs no pattern.
 
 ## Smoke checks in Staging and Production
 
@@ -934,6 +1242,23 @@ The lab chose this over an automatic rollback for these reasons:
 
 If Production had no earlier version, or the earlier version is the same, there is nothing to go back to. The summary says so, and the way forward is a new release.
 Rollback by `redeploy.yml` works for releases that have a stored assembly. The README of each service says which old versions cannot be redeployed.
+
+## The five kinds of test
+
+The pipeline runs five kinds of test. Each kind catches a fault that the others miss. The cheap kinds run early, so a fault does not wait for Test.
+
+| Kind | What it catches | When it runs |
+| --- | --- | --- |
+| Unit test | A logic error in one function of one repository. | On a pull request, and in the job `build` of a release. |
+| Contract test | A provider that breaks its consumers, although the provider passes its own tests. It compares files and calls nothing. See "Contract tests". | On a pull request, with no deployment. |
+| End-to-end suite | A break in the wiring that no file shows: the URLs, the permissions and the real data. See "The end-to-end gate". | In Test, after the deployment. |
+| Tested-set check | Version drift, when the services promote on their own. It compares version numbers of the neighbours in an environment with the set that passed in Test. See "The tested set". | Before the deployment to Staging and to Production. |
+| Smoke check | A deployment that succeeded, but the service does not answer. It sends a few read-only requests to the live environment. See "Smoke checks in Staging and Production". | After the deployment to Staging and to Production. |
+
+The contract test and the tested-set check look similar, but they check different things.
+The contract test asks: "Does the new provider still keep the promises that its consumers use?" It answers from files, before any deployment.
+The tested-set check asks: "Do the neighbours in this environment have at least the versions that passed together in Test?"
+It answers from version numbers, right before a deployment.
 
 ## The fault drill
 
@@ -1173,7 +1498,7 @@ The CI of this repository downloads both tools on each run. So a wrong hash or a
 ## Checks of this repository
 
 The `ci` workflow runs on each pull request. It installs `actionlint` and `gitleaks` with `actions/install-tool`.
-It runs the tests of the scripts: next-version, lock, preflight, supersede, propose-rollback, install-tool, changed-paths and secret-scan. The new tests need `jq`, which the runner image has. It also runs `shellcheck` and `actionlint`.
+It runs the tests of the scripts: next-version, lock, preflight, supersede, propose-rollback, install-tool, changed-paths and secret-scan. It also runs the tests of the Node scripts for the diff comment, the preview and the contract check. The new tests need `jq`, which the runner image has. It also runs `shellcheck` and `actionlint`.
 
 `actionlint` is not optional. It checks every workflow file in `.github/workflows/`, and it runs `shellcheck` on the `run:` scripts.
 Any finding fails the job `check`. `shellcheck` on the scripts still runs only if the runner image has it, and the image has it today.
