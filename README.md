@@ -592,6 +592,8 @@ Every pull request of a service repository can show what a release would change 
 The reusable workflow `diff.yml` posts the answer as one comment. The comment changes in place on each push, so the pull request never gets a second one.
 
 The comment has one line with the counts, for example `1 to add, 2 to change, 0 to replace, 1 to delete`. The full diff is in a folded block below it.
+A change of the description, a parameter or an output is not a resource, so the four counts stay at zero. The line then adds `but something else differs (for example a parameter, an output or the description)`.
+The comment says `No change.` only when the CLI finds no difference at all.
 
 ### The four jobs
 
@@ -600,7 +602,7 @@ A pull request runs code that its author wrote. The workflow keeps that code awa
 | Job | What it holds | What it runs |
 | --- | --- | --- |
 | `gate` | Nothing | A script of this repository. It decides if the diff can run. |
-| `fetch` | The AWS role `github-pr-diff` (an OIDC token) | The code of `diff.yml` only. It reads the deployed template and the version of each stack. |
+| `fetch` | The AWS role `github-pr-diff` (an OIDC token) | The code of `diff.yml` only. It reads the deployed template, the version and the status of each stack. |
 | `compute` | Nothing (no AWS credentials, no write token) | The code of the pull request: `npm ci` and `cdk synth`. Then `cdk diff --template`, which needs no AWS access. |
 | `report` | The right to write a comment | A script of this repository. It reads the diff as data. It runs no code of the pull request. |
 
@@ -614,6 +616,15 @@ So only the file `diff.yml` on `main` of this repository can use the role. The R
 The synth of a pull request uses the version `0.0.0-dev` by default. A release uses a new version. So the version would show as a change on every pull request.
 The job `fetch` reads the output `Version` from the deployed template (not from the stack outputs, which lag during a deployment). The job `compute` synthesises with `-c version=<that version>`.
 The comment says which version it used. Set the input `pass-version` to `false` for an app that has no `version` context value.
+Core, account, catalogue and web all have one, so they keep the default `true`.
+
+### A stack in the middle of a deployment
+
+The diff compares with the template that CloudFormation holds. While a deployment runs, that can be the template of a release that is still running.
+The job `fetch` reads the status of each stack from `describe-stacks`, the call it makes already. So the role `github-pr-diff` needs no new permission, and its policy does not change.
+When the status is not a stable `*_COMPLETE` status, for example `UPDATE_IN_PROGRESS`, the comment names the stack and the status. It adds one sentence: the comparison may be against a release that still runs.
+A stable status shows nothing. The comment also shows nothing when `fetch` wrote no status.
+The meta file comes from a job that ran the code of the pull request, so the comment shows only a value that has the form of a CloudFormation status.
 
 ### The stateful change guard
 
@@ -642,7 +653,15 @@ It skips the other jobs and writes a notice with the reason in the log and in th
 A Dependabot pull request is skipped for the same reason. So is a repository that has no account secret.
 `gate` runs `decideRun` in `actions/cdk-diff/lib.mjs`. Unit tests cover the fork, the Dependabot, the missing secret and the other events.
 
-The live fork case is not proven. The owner of the lab has one GitHub account, and a user cannot fork his own repository.
+Only unit tests prove the fork case. The owner of the lab has one GitHub account, and a user cannot fork his own repository.
+A second GitHub account would prove the live case: a fork pull request must show the notice and must not fail.
+
+### The required checks block a merge when AWS is down
+
+The ruleset of each service repository requires the checks `pr / diff / gate`, `pr / diff / fetch`, `pr / diff / compute` and `pr / diff / report`.
+If AWS is down, or the role `github-pr-diff` stops working, the job `fetch` fails and no pull request can merge.
+This is on purpose. GitHub counts a skipped required check as passed, so a diff that cannot run must fail and not skip.
+A person repairs the role with the SSO administrator profile. Do not remove the checks from the ruleset to get a merge.
 
 ### No account number in the comment
 
@@ -927,17 +946,19 @@ The next section explains what the tested set is. The check compares each neighb
 | The same version as in the tested set | Goes on. |
 | Newer than the tested set | Goes on, with a notice. |
 | Older, and inside the range of `compatible` or `requires` | Goes on. The table says that `pipeline.json` accepts it. |
-| Older, and no range accepts it | The job fails with `Missing release`. The message names the version and the repository to release. |
+| Older, and no range accepts it | The job fails with `Missing release`. The message names the neighbour, the version of the tested set, the version in the environment and the cure. |
 | Not deployed (no parameter) | Goes on, with a notice. There is nothing to compare. |
 
 A range in `compatible` is a statement of the owner: "this service works with the older version". The pipeline cannot know it. An undeclared neighbour is strict on purpose.
 The failure message looks like this:
 
 ```
-::error title=Missing release::core 0.5.2 was in the set that the E2E suite tested with web 0.4.0 (release v0.4.0 of web), but production runs core 0.5.1. Release core 0.5.2 to production first (repository lab-svc-core), then run this job again. Or add a range for core to pipeline.json, if web works with the older version.
+::error title=Missing release::core 0.5.2 was in the set that the E2E suite tested with web 0.4.0 (release v0.4.0 of web), but production runs core 0.5.1. The repository of core is lab-svc-core. Promote core 0.5.2 to production first, then choose Re-run failed jobs on this run. Or add a `compatible` range for core to pipeline.json if the older version is known to work.
 ```
 
-When the missing release reaches the environment, run the failed job again. The check reads the state again and passes.
+The log has this line. The job summary repeats the same text under the heading "What to do", one entry for each neighbour that is too old.
+
+When the missing release reaches the environment, choose **Re-run failed jobs** on the run. The check reads the state again and passes. The decision about ranges is in "Why the check is strict".
 
 ### The rollback floor
 
@@ -1023,7 +1044,7 @@ The suite reports web, catalogue, account and core only, so a release of another
 ### What this guarantees, and what it does not
 
 It guarantees this: **when a release goes to an environment that has a version of a neighbour, that neighbour is the same version as in the tested set, or newer, or older but accepted by the owner in `pipeline.json`.** A release cannot reach Production next to an older neighbour that nobody looked at.
-The message names the missing release, so the person knows what to release first.
+The message names the missing release, so the person knows what to promote first.
 The guarantee has gaps on purpose: a neighbour with no version in the environment only gives a notice, a release with `run-e2e: false` has no record to compare, and a redeploy only warns.
 
 It does not guarantee these things:
@@ -1033,6 +1054,12 @@ It does not guarantee these things:
 - It trusts the owner who writes a range in `pipeline.json`.
 - It reads versions from SSM. A parameter that a person changed by hand would give a wrong answer. The role of the pipeline cannot write the parameters, and only the stack writes them.
 - Between the check and the deployment there are a few seconds. Another release of another repository can deploy in that time.
+
+### Why the check is strict
+
+Decision of the owner (2026-10-08, [lab-platform#47](https://github.com/jross24/lab-platform/issues/47)): the check stays strict, and no service has a `compatible` range now. A range is a promise that nobody tested. The wait has a simple cure: promote the neighbour first. The owner decides again when a real wait costs time often.
+
+Open risk: two services that each need the other in Production first would wait for each other. The lab has no such pair, because a release records the state of Test at the time of its suite. The way out is a `compatible` range for one of the two, or one coordinated approval of both releases.
 
 ### Why this is cheaper than promoting all services as one set
 

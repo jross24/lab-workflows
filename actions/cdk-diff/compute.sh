@@ -69,8 +69,13 @@ while IFS=$'\t' read -r display name template; do
   if [[ "$deployed" == "true" ]]; then
     cp "$old" "diff/${id}.old.json"
   fi
-  stacks_meta="$(jq -c --arg id "$id" --arg name "$name" --argjson deployed "$deployed" \
-    '. + [{id: $id, name: $name, deployed: $deployed}]' <<< "$stacks_meta")"
+  # The job fetch wrote the status of the deployed stack. An older fetch job wrote none, and then the value is null.
+  status=""
+  if [[ -f deployed/meta.json ]]; then
+    status="$(jq -r --arg name "$name" '[.stacks[] | select(.name == $name) | (.status // empty)][0] // empty' deployed/meta.json)"
+  fi
+  stacks_meta="$(jq -c --arg id "$id" --arg name "$name" --argjson deployed "$deployed" --arg status "$status" \
+    '. + [{id: $id, name: $name, deployed: $deployed, status: (if ($status | length) > 0 then $status else null end)}]' <<< "$stacks_meta")"
 done <<< "$stacks"
 
 jq -n --arg commit "${HEAD_SHA:-unknown}" --arg version "$version" --argjson stacks "$stacks_meta" \

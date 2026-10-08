@@ -1,0 +1,12 @@
+AI agent detected
+WARNING Parameters/Knob: Parameter 'Knob' is not referenced anywhere in the template (CloudFormation Validate)
+   Fx aws-cdk-lib.Stack
+   Acknowledge with 'CloudFormation-Validate::W2001'
+Stack Fx (fx-stack)
+Parameters
+[+] Parameter Knob Knob: {"Type":"String","Default":"x"}
+
+
+
+✨  Number of stacks with differences: 1
+

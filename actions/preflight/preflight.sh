@@ -417,9 +417,10 @@ fetch_floor() {
 # The check
 # ---------------------------------------------------------------------------
 
-# The table of the summary. The variables ROWS, NOTICES and FAILURES collect the result.
+# The table of the summary. The variables ROWS, NOTICES, TODO and FAILURES collect the result.
 ROWS=''
 NOTICES=''
+TODO=''
 FAILURES=0
 
 # add_row <check> <service> <needed> <found> <result text>
@@ -438,6 +439,21 @@ notice() {
   echo "::notice title=$1::$2"
 }
 
+# fail_with_todo <title> <text>
+# Like fail, and the summary also repeats the text in the section "What to do". Use it for a failure that a person cures.
+fail_with_todo() {
+  fail "$1" "$2"
+  TODO+="- $2"$'\n'
+}
+
+# missing_release_text <neighbour> <tested version> <found> <service> <version> <tested release> <environment>
+# The text of the failure "Missing release". It names the neighbour, the tested version, the version in the environment
+# and the cure. Keep the words as they are: the README and the tests quote them.
+missing_release_text() {
+  local name="$1" tested_version="$2" found="$3" service="$4" version="$5" tested_release="$6" environment="$7"
+  printf '%s' "$name $tested_version was in the set that the E2E suite tested with $service ${version:-this release} (release ${tested_release:-unknown} of $service), but $environment runs $name $found. The repository of $name is $(repository_of "$name"). Promote $name $tested_version to $environment first, then choose Re-run failed jobs on this run. Or add a \`compatible\` range for $name to pipeline.json if the older version is known to work."
+}
+
 # write_summary <environment> <service> <version> <mode>
 write_summary() {
   local environment="$1" service="$2" version="$3" mode="$4" title text release=''
@@ -448,6 +464,9 @@ write_summary() {
   text+='| Check | Service | Needed or tested | In the environment | Result |'$'\n'
   text+='| --- | --- | --- | --- | --- |'$'\n'
   text+="$ROWS"
+  if [[ -n "$TODO" ]]; then
+    text+=$'\n'"#### What to do"$'\n\n'"$TODO"
+  fi
   if [[ -n "$NOTICES" ]]; then
     text+=$'\n'"$NOTICES"
   fi
@@ -611,7 +630,7 @@ check() {
         older)
           if [[ "$mode" == release ]]; then
             add_row 'tested together' "$name" "$tested_version" "$found" 'FAILED: missing release'
-            fail 'Missing release' "$name $tested_version was in the set that the E2E suite tested with $service ${version:-this release} (release ${tested_release:-unknown} of $service), but $environment runs $name $found. Release $name $tested_version to $environment first (repository $(repository_of "$name")), then run this job again. Or add a range for $name to pipeline.json, if $service works with the older version."
+            fail_with_todo 'Missing release' "$(missing_release_text "$name" "$tested_version" "$found" "$service" "$version" "$tested_release" "$environment")"
           else
             add_row 'tested together' "$name" "$tested_version" "$found" 'warning: older than tested (a redeploy does not stop)'
             notice 'Older neighbour' "$environment runs $name $found, which is older than the $tested_version of the tested set. A redeploy does not stop for this."
