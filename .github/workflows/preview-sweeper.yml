@@ -1,0 +1,74 @@
+name: preview-sweeper
+
+# Removes the temporary environments that nobody needs. A preview goes when its pull request is closed or merged,
+# or when it is older than the limit. The closing of a pull request removes its preview already. This workflow is
+# the safety net for a run that failed, a label that was removed while the workflow was down, and a forgotten
+# pull request. The README section "The temporary environment of a pull request" explains it.
+#
+# The job runs on main of this repository. The role github-preview-sweeper trusts that and nothing else.
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      max-age-days:
+        description: Remove a preview that is older than this number of days, also when its pull request is open.
+        type: string
+        required: false
+        default: '3'
+      dry-run:
+        description: Only show what would go.
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: preview-sweeper
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.PR_ACCOUNT_ID_DEV }}:role/github-preview-sweeper
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.PR_ACCOUNT_ID_DEV }}:role/cdk-hnb659fds-deploy-role-${{ secrets.PR_ACCOUNT_ID_DEV }}-${{ vars.AWS_REGION }}
+          role-chaining: true
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - name: list the stacks
+        run: aws cloudformation describe-stacks --output json > stacks.json
+      - id: plan
+        name: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          MAX_AGE_DAYS: ${{ inputs.max-age-days || '3' }}
+        run: node actions/preview/cli.mjs sweep stacks.json
+      - name: remove the stacks
+        if: ${{ steps.plan.outputs.count != '0' && !inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          for stack in $(jq -r '.delete[].stack' sweep.json); do
+            echo "Removing ${stack}."
+            aws cloudformation delete-stack --stack-name "$stack"
+            aws cloudformation wait stack-delete-complete --stack-name "$stack"
+            echo "Stack ${stack} is removed."
+          done
+      - name: dry run
+        if: ${{ steps.plan.outputs.count != '0' && inputs.dry-run }}
+        run: echo "Dry run. The stacks above stay."
