@@ -7,7 +7,7 @@ The pipeline has three reusable workflows and several composite actions.
 
 | File | What it does |
 | --- | --- |
-| `.github/workflows/pr.yml` | Checks a pull request: lint, typecheck, tests, `cdk synth`. It has no AWS access. |
+| `.github/workflows/pr.yml` | Checks a pull request: lint, typecheck, tests, `cdk synth`, a dependency check, a secret scan and `actionlint`. It has no AWS access. |
 | `.github/workflows/release.yml` | Releases a push to `main`: version tag, one build, then Test (with the lock and the E2E gate), Staging and Production. |
 | `.github/workflows/redeploy.yml` | Deploys an old release again. This is the rollback path. |
 | `actions/next-version` | Works out the next version from the commit titles. |
@@ -569,6 +569,80 @@ Then a change to the pipeline reaches a service only when that service moves the
 This lab accepts `@main` for two reasons. One person owns all the repositories. The lab wants a pipeline change to show its effect immediately.
 
 Actions from other owners are different. This repository pins each of them to a full commit SHA.
+
+## The scans in the pull request workflow
+
+`pr.yml` has three jobs next to `check`: `dependencies`, `secrets` and `actionlint`. In a service repository the checks are named `pr / dependencies`, `pr / secrets` and `pr / actionlint`.
+Each job asks only for `contents: read`. So the caller needs no change.
+The jobs use the actions of this repository with `@main`, like the release workflow.
+
+### The dependency check
+
+The job `dependencies` runs `actions/dependency-review-action` (v5.0.0, pinned to a full commit SHA). GitHub owns this action.
+It compares the dependency graph of the base commit with the graph of the head commit. It fails when the pull request adds or changes a package that has an advisory of severity `high` or `critical`.
+It checks the scopes `runtime` and `development`, because a build tool also runs in CI. It does not check licences.
+
+**Why this and not `npm audit` with a baseline.** `npm audit` reports a `brace-expansion` copy inside `aws-cdk-lib` ([lab-platform#15](https://github.com/jross24/lab-platform/issues/15)).
+Nobody can fix it, because `aws-cdk-lib` ships that copy inside its own package. A plain `npm audit` stays red for ever.
+A baseline can hide that one finding, but a person must keep the baseline up to date in each repository.
+
+The diff tool needs no baseline. The old finding is in the base commit and in the head commit, so it is not in the diff. A new package with an advisory is in the diff, so the job fails.
+The lab tested both cases. A change to the `aws-cdk-lib` entry of the lockfile passed. A new dependency on `minimist` 1.2.5 (critical advisory GHSA-xvch-5gv4-984h) failed.
+
+**What the diff tool misses.** It misses a new advisory against a package that no pull request changes. The lockfile does not change, so there is no diff.
+`npm audit` finds this case, because it audits the whole tree each time. But then every pull request turns red on the day of the advisory, also a pull request that does not touch a dependency.
+The lab covers the gap with Dependabot alerts, which are native and free. They notify the owner. They do not block a pull request.
+
+**Why `high`.** A check that people ignore protects nobody. A lower level fails more pull requests, and the owner of the lab would soon learn to ignore it.
+`high` and `critical` are the findings that need action now. Change `fail-on-severity` in `pr.yml` to change the level.
+
+**The dependency graph must be on.** The action reads the dependency graph of the repository. On the lab repositories the graph was off.
+Then the job fails with the message "Dependency review is not supported on this repository".
+The REST API turns the graph on only together with Dependabot alerts (`PUT /repos/{owner}/{repo}/vulnerability-alerts`). It turns the graph off again when you turn the alerts off.
+So the four service repositories have Dependabot alerts on. A new service repository needs the same setting.
+
+### The secret scan
+
+The lab uses two layers, because each layer has a gap that the other one closes.
+
+**Layer 1: native secret scanning and push protection.** Both are on in all seven repositories. They are free for a public repository.
+Push protection refuses a push that holds a known provider token, before the token reaches the repository. In a test it refused a fake Slack token and a fake Stripe key (error `GH013`, "Push cannot contain secrets").
+It has four limits. It knows only the patterns of providers. A person can bypass it with a click and a reason. It gives no failing check on the pull request.
+And it let a fake GitHub token through in the test. The lab did not find out why.
+
+**Layer 2: the job `secrets`.** It runs `gitleaks` on the commits of the pull request. It runs after the push, so in a public repository the secret is already public when the job fails.
+But the job is a check that a person cannot bypass with a click. It also finds generic patterns, for example `api_key = "<random text>"`, and tokens that push protection let through.
+In the test it found the fake GitHub token that push protection did not block.
+
+The job has these properties:
+
+- It scans only the commits after the base commit, up to the head commit. Older history is not scanned.
+- It scans merge commits too. A secret that an author adds while the author resolves a merge conflict is found.
+- It never prints a secret. `gitleaks` redacts the value, and the report holds only the rule, the file, the line and the short commit id. It holds no author and no email address.
+- A pull request cannot weaken it. The rules come from `actions/secret-scan/gitleaks.toml`. A config file or a `.gitleaksignore` file in the scanned repository has no effect, and a `gitleaks:allow` comment has no effect.
+  To allow a false positive, add an allow rule to `gitleaks.toml` in a pull request to this repository.
+
+If the job fails, treat the secret as public. Revoke or rotate it first. Then remove it from the commits. Deleting the branch does not hide the commit in a public repository.
+
+**Two native options that did not turn on.** The lab tried the settings `secret_scanning_non_provider_patterns` and `secret_scanning_validity_checks` on all seven repositories.
+The REST API answers `200 OK`, but the value stays `disabled`. The documentation does not say whether a free public repository can use them.
+
+### The actionlint job
+
+The job `actionlint` checks the workflow files of the service repository. It runs only when the pull request changes a file under `.github/`.
+The action `actions/changed-paths` decides this with `git diff --name-only base...head`. The three dots compare the head with the merge base, so a change that only the base branch has does not count.
+
+If nothing under `.github/` changed, the job passes and prints the notice "actionlint is skipped". The job always finishes, so a required check never waits for ever.
+If the action cannot tell what changed, it runs the check. A check that runs without need is better than a check that is skipped without reason.
+`actionlint` checks all workflow files of the repository, not only the changed ones. It also runs `shellcheck` on the `run:` scripts, because the runner image has `shellcheck`.
+
+### Test a change of `pr.yml` before it reaches `main`
+
+The jobs use the actions with `@main`. So an action must be on `main` before a test can use it. Merge a change of an action first, and change `pr.yml` in a second pull request.
+
+To test `pr.yml`, create a branch in a service repository, for example `test-base`. Change its `pr.yml` to call `pr.yml@<your branch>`.
+Then open draft pull requests against `test-base`, not against `main`. Their diff holds only the test change, and each pull request runs the workflow of your branch.
+Close the pull requests without a merge and delete the branches.
 
 ## Install a tool with a pinned checksum
 
