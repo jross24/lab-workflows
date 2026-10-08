@@ -781,6 +781,7 @@ What stops harm:
 - **The CloudFormation execution role has a custom policy.** The role of the CDK bootstrap in `lab-dev` has the policy `lab-dev-cfn-execution` and not `AdministratorAccess`. It allows only the resource types of the `Dev` stages (API Gateway, AppConfig, CloudWatch, CodeDeploy, DynamoDB, Lambda, CloudWatch Logs, SSM, X-Ray and IAM roles), for names that start with `lab-`, in one region. A template with an SQS queue, an IAM user or an EC2 instance fails with `AccessDenied`.
 - **Every role of a preview carries a permissions boundary.** The execution policy refuses `iam:CreateRole`, and every action that adds a policy to a role, unless the role carries the policy `lab-dev-boundary`. The boundary has no `sts:AssumeRole`, no IAM and no CloudFormation. So a Lambda function of a preview cannot assume the CDK deploy role. The `build` job writes the boundary into `~/.cdk.json`, and CDK then adds it to each role. Code that ignores the file only makes its own deployment fail.
 - **The identities of the platform are out of reach.** An explicit deny blocks every IAM action on the roles `github-*`, the roles of the CDK bootstrap, the roles of the single sign-on, the OIDC provider, users, groups and the two guardrail policies.
+- **A service control policy limits the account.** `lab-dev-guardrail` is attached to `lab-dev` in the management account. It denies every region except `eu-west-2` (the global services stay open), and it denies EC2 launches, NAT gateways, RDS, Redshift, SageMaker, EKS, ElastiCache, OpenSearch and a few more services. It also limits the administrator of `lab-dev`. The pipeline and the roles of a preview cannot detach it: only a person with the profile of the management account can.
 - **The names are checked.** The build fails unless the assembly holds exactly one stack, `<repository>-pr-<number>`. Code that does not know the namespace makes the baseline name. The deploy job checks again before it has any credential. The destroy job removes a stack only if its tags name this repository and this pull request.
 - **Cost.** A closed pull request removes its preview. The sweeper removes the rest.
 
@@ -789,10 +790,10 @@ What does not stop harm:
 - **A template can create the allowed types with any name that starts with `lab-`.** It can create many Lambda functions or DynamoDB tables, and fill the account until a person sees it. It cannot create another type, and a role of it cannot do more than the boundary allows.
 - **The CDK CLI of the pull request runs with the credentials.** The deploy job installs the CLI from the lockfile of the pull request. It can call the CDK deploy role directly, for example `DeleteStack` on a baseline stack. This gives nothing that the template does not give already.
 - **The label is not an authorisation.** A person with write access to the repository can add the label to his own pull request. The label saves cost. It does not protect the account.
-- **There is no budget alarm and no service control policy.** A mistake or an attack can cost money until a person sees it.
+- **The limits are on the type, the region and the name. They are not on the number.** A template can create many resources of an allowed type. A budget warns the owner when the cost grows, and it stops nothing.
 
 The lab accepts this because `lab-dev` is a throwaway account and only the owner can open a pull request in a lab repository.
-A team would add two more things: a service control policy that limits regions and services, and a budget alarm. The README of [lab-platform](https://github.com/jross24/lab-platform) explains the execution policy and the boundary, and how to apply them.
+The README of [lab-platform](https://github.com/jross24/lab-platform) explains the execution policy, the boundary, the service control policies and the budget, and how to apply them.
 
 ### Adopt it in another service
 
