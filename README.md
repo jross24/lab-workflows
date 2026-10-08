@@ -860,7 +860,7 @@ What the runs did not prove:
 
 - A pull request from a **fork**. The owner has one GitHub account, and a user cannot fork his own repository. Unit tests cover the decision (`decideRun` and `decidePreview`), and the behaviour of GitHub is from its documentation.
 - A **Dependabot** pull request. Unit tests only.
-- The sweeper on its **schedule**. The runs above started from a branch with a temporary trigger. The first scheduled run is at the next hour that fits the cron expression.
+- The sweeper **removing a stack on its schedule**. The first scheduled run passed ([37827785347](https://github.com/jross24/lab-workflows/actions/runs/37827785347), event `schedule`, 2026-10-08 18:53 UTC), but its step `decide` found no stack to remove. GitHub started it 30 minutes after its slot, and the slot at 12:23 UTC that day has no run.
 
 ## The file `pipeline.json`
 
@@ -2044,3 +2044,5 @@ The step "check the list of accepted advisories" fails when an entry of `accepte
 `actionlint` is not optional. It checks every workflow file in `.github/workflows/`, and it runs `shellcheck` on the `run:` scripts.
 Any finding fails the job `check`. `shellcheck` on the scripts still runs only if the runner image has it, and the image has it today.
 See [lab-platform#22](https://github.com/jross24/lab-platform/issues/22).
+
+The jobs run on `ubuntu-24.04` because `ubuntu-latest` moves to a new Ubuntu major on 2026-10-19, and a new image can change `shellcheck`. A person moves the pin on purpose, in one pull request, and reads the first runs.

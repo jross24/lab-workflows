@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -47,7 +47,7 @@ jobs:
   # The job fetches the list from this repository at tools-ref (the job runs in the caller repository, so the pull request
   # cannot change the list). The script passes the ids that are not expired to the action. An expired id fails the job again.
   dependencies:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -71,7 +71,7 @@ jobs:
   # Fails when a commit of the pull request has a secret. It scans only the commits of the pull request.
   # It never prints the value of a secret.
   secrets:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -88,7 +88,7 @@ jobs:
   # Runs actionlint on the workflow files when the pull request changes something under .github/.
   # Otherwise the job passes and prints a notice that it skipped the check.
   actionlint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -115,7 +115,7 @@ jobs:
   # so it needs no AWS access and no write permission. A repository without contract files gets a notice, and the job passes.
   # The name of the job is part of the name of the required check: pr / contracts.
   contracts:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -136,7 +136,7 @@ jobs:
   # cannot name another repository: the checkout below always uses jross24/lab-workflows. The name of the job is part
   # of the name of the required check: pr / shared.
   shared:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read

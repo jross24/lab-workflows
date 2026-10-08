@@ -69,7 +69,7 @@ concurrency:
 
 jobs:
   gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -93,7 +93,7 @@ jobs:
   fetch:
     needs: [gate]
     if: ${{ needs.gate.outputs.run == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Only the OIDC token. The job reads no repository content.
     permissions:
@@ -158,7 +158,7 @@ jobs:
   compute:
     needs: [gate, fetch]
     if: ${{ needs.gate.outputs.run == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # This job runs the code of the pull request. It gets no id-token and no write permission.
     permissions:
@@ -199,7 +199,7 @@ jobs:
   report:
     needs: [gate, compute]
     if: ${{ needs.gate.outputs.run == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read

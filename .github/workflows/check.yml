@@ -32,7 +32,7 @@ permissions: {}
 jobs:
   # A job that names an environment that does not exist creates it. So this job checks the name first.
   names:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - env:
           ENVIRONMENT: ${{ inputs.environment }}
@@ -47,7 +47,7 @@ jobs:
 
   dry-run:
     needs: [names]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: ${{ inputs.environment }}
     timeout-minutes: 10
     permissions:

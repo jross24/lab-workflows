@@ -41,7 +41,7 @@ jobs:
   # The group makes two versions run one after the other. Two jobs that run at the same time could read the same
   # tags and make the same version. The job is short, so a run waits a few seconds at most.
   version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
       group: release-version
@@ -82,7 +82,7 @@ jobs:
   # release. If the release does not exist, or does not hold both files, the job builds. The summary names the path.
   build:
     needs: [version]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: write
@@ -172,7 +172,7 @@ jobs:
   # one release waits for the lock replaces the second one, because the third contains the changes of the second.
   lock-test:
     needs: [version, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: test
     timeout-minutes: 25
     concurrency:
@@ -201,7 +201,7 @@ jobs:
   # in an account waits until the setting is active. That took 6 minutes in a test account. A normal deployment needs 2 minutes.
   deploy-test:
     needs: [version, build, lock-test]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: test
     timeout-minutes: 15
     permissions:
@@ -264,7 +264,7 @@ jobs:
   e2e-summary:
     needs: [e2e]
     if: ${{ always() && needs.e2e.result != 'skipped' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -302,7 +302,7 @@ jobs:
   tested-set:
     needs: [version, e2e]
     if: ${{ !cancelled() && needs.e2e.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write
@@ -346,7 +346,7 @@ jobs:
   unlock-test:
     needs: [lock-test, deploy-test, e2e]
     if: ${{ always() && needs.lock-test.result != 'skipped' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: test
     timeout-minutes: 5
     permissions:
@@ -376,7 +376,7 @@ jobs:
       && needs.deploy-test.result == 'success'
       && ((needs.e2e.result == 'success' && needs.tested-set.result == 'success')
         || (needs.e2e.result == 'skipped' && !inputs.run-e2e)) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: staging
     timeout-minutes: 25
     concurrency:
@@ -425,7 +425,7 @@ jobs:
   supersede:
     needs: [version, deploy-staging]
     if: ${{ !cancelled() && needs.deploy-staging.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       actions: write
@@ -455,7 +455,7 @@ jobs:
   deploy-production:
     needs: [version, build, deploy-staging, tested-set, supersede]
     if: ${{ !cancelled() && needs.deploy-staging.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 40
     concurrency:
@@ -518,7 +518,7 @@ jobs:
   record-production:
     needs: [version, deploy-production]
     if: ${{ !cancelled() && needs.deploy-production.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write
