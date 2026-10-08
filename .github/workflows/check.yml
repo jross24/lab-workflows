@@ -62,7 +62,7 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
-      - uses: jross24/lab-workflows/actions/preflight@preflight
+      - uses: jross24/lab-workflows/actions/preflight@main
         with:
           environment: ${{ inputs.environment }}
           version: ${{ inputs.version }}

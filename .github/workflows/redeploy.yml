@@ -74,7 +74,7 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
-      - uses: jross24/lab-workflows/actions/lock-acquire@preflight
+      - uses: jross24/lab-workflows/actions/lock-acquire@main
 
   # The limit is the limit of the deployment plus 10 minutes for the checks and the smoke subset.
   # The deployment to production moves the traffic in steps, like a release, and needs 30 minutes at most.
@@ -131,17 +131,17 @@ jobs:
       # After "Re-run failed jobs" the job lock does not run again. See the step with the same name in release.yml.
       - name: make sure this run holds the lock
         if: ${{ inputs.environment == 'test' }}
-        uses: jross24/lab-workflows/actions/lock-acquire@preflight
+        uses: jross24/lab-workflows/actions/lock-acquire@main
         with:
           max-wait-minutes: 0
           fail-hint: 'If this is a re-run of failed jobs, the lock was released in the first attempt and another run holds it now. Wait until that run has ended. Then re-run the failed jobs again.'
-      - uses: jross24/lab-workflows/actions/preflight@preflight
+      - uses: jross24/lab-workflows/actions/preflight@main
         with:
           environment: ${{ inputs.environment }}
           version: ${{ needs.check.outputs.version }}
           mode: redeploy
           tested-with: ${{ steps.download.outputs.tested-with }}
-      - uses: jross24/lab-workflows/actions/deploy@preflight
+      - uses: jross24/lab-workflows/actions/deploy@main
         with:
           assembly: cdk-out-${{ needs.check.outputs.tag }}.zip
           digest: ${{ steps.download.outputs.digest }}
@@ -150,7 +150,7 @@ jobs:
       - id: info
         name: read the name of the service
         if: ${{ inputs.environment != 'test' }}
-        uses: jross24/lab-workflows/actions/pipeline-info@preflight
+        uses: jross24/lab-workflows/actions/pipeline-info@main
       # The smoke subset checks that the environment reports the version that the redeploy put there. Test has no smoke
       # check in a redeploy: it has the full suite in a release.
       - name: smoke check
@@ -179,4 +179,4 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
-      - uses: jross24/lab-workflows/actions/lock-release@preflight
+      - uses: jross24/lab-workflows/actions/lock-release@main
