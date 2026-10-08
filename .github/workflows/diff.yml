@@ -6,7 +6,7 @@ name: diff
 # Four jobs, and only the first two hold anything of value:
 #   gate     decides if the diff can run (a fork or Dependabot pull request gets no OIDC token).
 #   fetch    has the AWS role github-pr-diff. It runs the code of this file only, and it reads two things:
-#            the deployed template and the version of each stack.
+#            the deployed template, the version and the status of each stack.
 #   compute  runs the CODE OF THE PULL REQUEST (npm ci, cdk synth). It has no AWS credentials and no write token.
 #   report   has the right to write a comment. It runs the scripts of this repository and no code of the pull request.
 #
@@ -118,7 +118,7 @@ jobs:
             if ! aws cloudformation describe-stacks --stack-name "$name" --output json > describe.json 2> describe.err; then
               if grep -q "does not exist" describe.err; then
                 echo "Stack ${name} is not deployed in this account yet."
-                meta="$(jq -c --arg name "$name" '. + [{name: $name, deployed: false, version: null}]' <<< "$meta")"
+                meta="$(jq -c --arg name "$name" '. + [{name: $name, deployed: false, version: null, status: null}]' <<< "$meta")"
                 continue
               fi
               cat describe.err
@@ -140,8 +140,11 @@ jobs:
             # The version comes from the template that the diff uses, and not from the stack outputs.
             # While a deployment runs, the template can be newer than the outputs.
             version="$(jq -r '.Outputs.Version.Value // empty | select(type == "string")' "deployed/${name}.json")"
-            meta="$(jq -c --arg name "$name" --arg version "$version" \
-              '. + [{name: $name, deployed: true, version: (if ($version | length) > 0 then $version else null end)}]' <<< "$meta")"
+            # The status shows in the comment when it is not a stable *_COMPLETE status. The role reads it with
+            # cloudformation:DescribeStacks, the call that this step makes already.
+            status="$(jq -r '.Stacks[0].StackStatus // empty | select(type == "string")' describe.json)"
+            meta="$(jq -c --arg name "$name" --arg version "$version" --arg status "$status" \
+              '. + [{name: $name, deployed: true, version: (if ($version | length) > 0 then $version else null end), status: (if ($status | length) > 0 then $status else null end)}]' <<< "$meta")"
           done
           jq -n --argjson stacks "$meta" '{stacks: $stacks}' > deployed/meta.json
           rm -f describe.json describe.err

@@ -570,6 +570,8 @@ Every pull request of a service repository can show what a release would change 
 The reusable workflow `diff.yml` posts the answer as one comment. The comment changes in place on each push, so the pull request never gets a second one.
 
 The comment has one line with the counts, for example `1 to add, 2 to change, 0 to replace, 1 to delete`. The full diff is in a folded block below it.
+A change of the description, a parameter or an output is not a resource, so the four counts stay at zero. The line then adds `but something else differs (for example a parameter, an output or the description)`.
+The comment says `No change.` only when the CLI finds no difference at all.
 
 ### The four jobs
 
@@ -578,7 +580,7 @@ A pull request runs code that its author wrote. The workflow keeps that code awa
 | Job | What it holds | What it runs |
 | --- | --- | --- |
 | `gate` | Nothing | A script of this repository. It decides if the diff can run. |
-| `fetch` | The AWS role `github-pr-diff` (an OIDC token) | The code of `diff.yml` only. It reads the deployed template and the version of each stack. |
+| `fetch` | The AWS role `github-pr-diff` (an OIDC token) | The code of `diff.yml` only. It reads the deployed template, the version and the status of each stack. |
 | `compute` | Nothing (no AWS credentials, no write token) | The code of the pull request: `npm ci` and `cdk synth`. Then `cdk diff --template`, which needs no AWS access. |
 | `report` | The right to write a comment | A script of this repository. It reads the diff as data. It runs no code of the pull request. |
 
@@ -592,6 +594,15 @@ So only the file `diff.yml` on `main` of this repository can use the role. The R
 The synth of a pull request uses the version `0.0.0-dev` by default. A release uses a new version. So the version would show as a change on every pull request.
 The job `fetch` reads the output `Version` from the deployed template (not from the stack outputs, which lag during a deployment). The job `compute` synthesises with `-c version=<that version>`.
 The comment says which version it used. Set the input `pass-version` to `false` for an app that has no `version` context value.
+Core, account, catalogue and web all have one, so they keep the default `true`.
+
+### A stack in the middle of a deployment
+
+The diff compares with the template that CloudFormation holds. While a deployment runs, that can be the template of a release that is still running.
+The job `fetch` reads the status of each stack from `describe-stacks`, the call it makes already. So the role `github-pr-diff` needs no new permission, and its policy does not change.
+When the status is not a stable `*_COMPLETE` status, for example `UPDATE_IN_PROGRESS`, the comment names the stack and the status. It adds one sentence: the comparison may be against a release that still runs.
+A stable status shows nothing. The comment also shows nothing when `fetch` wrote no status.
+The meta file comes from a job that ran the code of the pull request, so the comment shows only a value that has the form of a CloudFormation status.
 
 ### The stateful change guard
 
@@ -620,7 +631,15 @@ It skips the other jobs and writes a notice with the reason in the log and in th
 A Dependabot pull request is skipped for the same reason. So is a repository that has no account secret.
 `gate` runs `decideRun` in `actions/cdk-diff/lib.mjs`. Unit tests cover the fork, the Dependabot, the missing secret and the other events.
 
-The live fork case is not proven. The owner of the lab has one GitHub account, and a user cannot fork his own repository.
+Only unit tests prove the fork case. The owner of the lab has one GitHub account, and a user cannot fork his own repository.
+A second GitHub account would prove the live case: a fork pull request must show the notice and must not fail.
+
+### The required checks block a merge when AWS is down
+
+The ruleset of each service repository requires the checks `pr / diff / gate`, `pr / diff / fetch`, `pr / diff / compute` and `pr / diff / report`.
+If AWS is down, or the role `github-pr-diff` stops working, the job `fetch` fails and no pull request can merge.
+This is on purpose. GitHub counts a skipped required check as passed, so a diff that cannot run must fail and not skip.
+A person repairs the role with the SSO administrator profile. Do not remove the checks from the ruleset to get a merge.
 
 ### No account number in the comment
 

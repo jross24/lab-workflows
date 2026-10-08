@@ -236,3 +236,50 @@ describe('runReport', () => {
     assert.doesNotMatch(comments[0].body, /\d{12}/);
   });
 });
+
+// Items 2 and 3 of lab-platform#44, from the files of the jobs to the posted comment.
+describe('runReport: a template change without a resource change, and the status of the stack', () => {
+  function reportDirFor({ diffFile, status }) {
+    const dir = tempDir();
+    const fixtures = join(import.meta.dirname, 'fixtures');
+    const base = readFileSync(join(fixtures, 'template-base.json'), 'utf8');
+    writeFileSync(join(dir, 'stack-1.diff.txt'), readFileSync(join(fixtures, diffFile), 'utf8'));
+    writeFileSync(join(dir, 'stack-1.old.json'), base);
+    writeFileSync(join(dir, 'stack-1.new.json'), JSON.stringify({ ...JSON.parse(base), Description: 'New description' }));
+    const stack = { name: 'lab-svc-fx', id: 'stack-1', deployed: true };
+    if (status !== undefined) stack.status = status;
+    writeFileSync(join(dir, 'meta.json'), JSON.stringify({ commit: 'abcdef1234567', version: null, stacks: [stack] }));
+    return dir;
+  }
+
+  function post({ diffFile, status }) {
+    const comments = [];
+    const result = runReport({
+      dir: reportDirFor({ diffFile, status }),
+      env: { GH_REPO: 'jross24/lab-x', PR_NUMBER: '7', KEY: 'production', TITLE: 'cdk diff against Production', ACCOUNT_IDS: ACCOUNT },
+      gh: fakeGh(comments),
+      log: () => {},
+    });
+    return { result, body: comments[0].body };
+  }
+
+  it('says that something else differs for a change of the description only', () => {
+    const { result, body } = post({ diffFile: 'diff-description-only.txt' });
+    assert.equal(result.blocked, false);
+    assert.match(body, /0 to add, 0 to change, 0 to replace, 0 to delete, but something else differs/);
+    assert.match(body, /Old description to New description/);
+  });
+
+  it('shows the status of a stack that is in the middle of a deployment', () => {
+    const { body } = post({ diffFile: 'diff-safe-changes.txt', status: 'UPDATE_IN_PROGRESS' });
+    assert.match(body, /`lab-svc-fx`[^\n]*`UPDATE_IN_PROGRESS`/);
+    assert.match(body, /may be against a release that still runs/);
+  });
+
+  it('shows no status for a stable stack, and none for a meta file of the older fetch job', () => {
+    for (const status of ['UPDATE_COMPLETE', undefined, null]) {
+      const { body } = post({ diffFile: 'diff-safe-changes.txt', status });
+      assert.doesNotMatch(body, /still runs/, String(status));
+    }
+  });
+});
