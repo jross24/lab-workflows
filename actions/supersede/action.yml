@@ -1,0 +1,25 @@
+name: supersede
+description: Cancels the older runs of this workflow that still wait for the production reviewer. It never fails the release.
+
+# The job needs the permission actions: write, and the caller of the release must give it.
+# The README explains why an older approval has no use when a newer release is ready for production.
+inputs:
+  tag:
+    description: The tag of this release. The messages use it.
+    default: this release
+  job-suffix:
+    description: The end of the name of the job that waits for the reviewer.
+    default: deploy-production
+  token:
+    description: The token for the GitHub API.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        SUPERSEDE_TAG: ${{ inputs.tag }}
+        SUPERSEDE_JOB_SUFFIX: ${{ inputs.job-suffix }}
+      run: bash "$GITHUB_ACTION_PATH/supersede.sh"

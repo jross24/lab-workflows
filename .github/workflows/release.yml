@@ -1,15 +1,23 @@
 name: release
 
 # The release path of a service repository. Call it on a push to main.
-# The caller must give these permissions: contents: write, id-token: write.
+# The caller must give these permissions: contents: write, id-token: write, actions: write.
+# (actions: write lets a newer release cancel an older release that waits for the production reviewer.)
 # The caller must pass its secrets with "secrets: inherit". The README gives the reason.
+# The caller must not set a "concurrency" group for the whole run. This workflow orders the releases by itself, job by job.
 #
 # The order of the jobs:
-#   version -> build -> lock-test -> deploy-test -> e2e -> unlock-test
-#                                                      \-> deploy-staging -> deploy-production
-# Test is shared by all the service repositories. A release holds the lock of Test from lock-test
-# to unlock-test. Staging starts only if the E2E suite passed, or if the caller set run-e2e to false
-# and deploy-test passed. A failed suite still releases the lock.
+#   version -> build -> lock-test -> deploy-test -> e2e -> tested-set
+#                                         \          \-> unlock-test
+#                                          \-> (after e2e and tested-set) deploy-staging -> supersede -> deploy-production
+#
+# - Test is shared by all the service repositories. A release holds the lock of Test from lock-test to unlock-test.
+# - deploy-staging and deploy-production run the checks of the README first (the order of the providers, the tested set,
+#   and "no step back"), then deploy, then run the smoke subset of the E2E suite against the environment.
+# - Staging starts only if the E2E suite passed and the tested set is recorded, or if the caller set run-e2e to false and
+#   deploy-test passed. A failed suite still releases the lock.
+# - Each job that changes an environment has a concurrency group of its own. So a release that waits for the production
+#   reviewer does not stop the next release from reaching Test and Staging. The README explains the rules.
 on:
   workflow_call:
     inputs:
@@ -17,7 +25,7 @@ on:
         description: >-
           Run the end-to-end suite of lab-e2e against Test after the deployment, and stop the release
           if it fails. Set it to false only for a repository that has no E2E suite to run.
-          The release still takes the lock of Test.
+          The release still takes the lock of Test. With false, no tested set is recorded and its check is left out.
         type: boolean
         required: false
         default: true
@@ -26,18 +34,27 @@ on:
 permissions: {}
 
 jobs:
+  # The group makes two versions run one after the other. Two jobs that run at the same time could read the same
+  # tags and make the same version. The job is short, so a run waits a few seconds at most.
   version:
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-version
+      cancel-in-progress: false
     permissions:
       contents: write
     outputs:
       version: ${{ steps.next.outputs.version }}
       tag: ${{ steps.next.outputs.tag }}
+      service: ${{ steps.pipeline.outputs.service }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      # The file pipeline.json names the service and its providers. A bad file stops the release before it makes a tag.
+      - id: pipeline
+        uses: jross24/lab-workflows/actions/pipeline-info@main
       - id: next
         uses: jross24/lab-workflows/actions/next-version@main
       - name: create the tag on the released commit
@@ -49,7 +66,8 @@ jobs:
       - name: write the summary
         env:
           TAG: ${{ steps.next.outputs.tag }}
-        run: echo "### Release ${TAG} of commit ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
+          SERVICE: ${{ steps.pipeline.outputs.service }}
+        run: echo "### Release ${TAG} of ${SERVICE}, commit ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
 
   # The only job that synthesises. Each deploy job uses the cloud assembly from this job.
   build:
@@ -103,11 +121,17 @@ jobs:
 
   # Takes the lock of the shared Test environment. It waits when another release holds the lock.
   # The wait is 20 minutes at most, so the job limit is a little longer.
+  # The group lets only one release of this repository wait for the lock at a time, and the older release goes first.
+  # Without the group, a newer release could get the lock before an older one. A third release that arrives while
+  # one release waits for the lock replaces the second one, because the third contains the changes of the second.
   lock-test:
     needs: [version, build]
     runs-on: ubuntu-latest
     environment: test
     timeout-minutes: 25
+    concurrency:
+      group: release-test-queue
+      cancel-in-progress: false
     permissions:
       id-token: write
       contents: read
@@ -123,6 +147,7 @@ jobs:
   # a release can hold Test is: deploy-test 15 minutes (the limit of this job), plus the suite 12 minutes
   # (the limit of the job "suite" in lab-e2e), plus about 2 minutes for the small jobs and the start of
   # the runners. That is 29 minutes, so the margin is 11 minutes. A normal release needs a few minutes.
+  # The checks and the step "make sure this run holds the lock" are inside the 15 minutes of this job.
   # If one of these limits changes, check the sum again.
   # A service can release in steps with CodeDeploy, and CloudFormation waits for the CodeDeploy deployment.
   # In Test the deployment moves all the traffic at once, so it adds only a short time.
@@ -148,6 +173,19 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
+      # After "Re-run failed jobs", lock-test does not run again, and unlock-test of the first attempt released the lock.
+      # This step makes sure that this run holds the lock. In the first attempt it is a no-op that starts the expiry again.
+      # After a re-run it takes the lock again if Test is free. It does not wait. If another run holds the lock,
+      # the step fails and tells the person to run all jobs again, so that lock-test queues for the lock.
+      - name: make sure this run holds the lock
+        uses: jross24/lab-workflows/actions/lock-acquire@main
+        with:
+          max-wait-minutes: 0
+          fail-hint: 'If this is a re-run of failed jobs, the lock was released in the first attempt and another run holds it now. Run all jobs again, so that lock-test queues for the lock.'
+      - uses: jross24/lab-workflows/actions/preflight@main
+        with:
+          environment: test
+          version: ${{ needs.version.outputs.version }}
       - uses: jross24/lab-workflows/actions/deploy@main
         with:
           assembly: cdk-out-${{ needs.version.outputs.tag }}.zip
@@ -159,8 +197,9 @@ jobs:
   # cannot set an environment. The job inside run.yml sets it. The README explains which secrets and
   # which OIDC identity that job gets when a service repository started the release.
   # "secrets: inherit" is needed at each level. GitHub passes secrets only to the workflow that a job calls.
+  # The suite also checks that Test reports the version of this release (the release test).
   e2e:
-    needs: [deploy-test]
+    needs: [version, deploy-test]
     if: ${{ inputs.run-e2e }}
     permissions:
       id-token: write
@@ -168,11 +207,13 @@ jobs:
     uses: jross24/lab-e2e/.github/workflows/run.yml@main
     with:
       environment: test
+      service: ${{ needs.version.outputs.service }}
+      version: ${{ needs.version.outputs.version }}
     secrets: inherit
 
   # Shows in the summary of the release which versions the E2E suite tested.
-  # When the suite fails, the called workflow may give no outputs to this job. The lab has not checked this,
-  # and the GitHub documentation does not say. The script below writes "not recorded" for an empty output.
+  # A called workflow that failed still gives its outputs to this job. The lab checked this on 2026-10-08.
+  # The script below writes "not recorded" for an empty output anyway, for example when the suite never ran.
   e2e-summary:
     needs: [e2e]
     if: ${{ always() && needs.e2e.result != 'skipped' }}
@@ -206,9 +247,53 @@ jobs:
             echo "lab-e2e commit: \`${E2E_COMMIT:-unknown}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Records the set of versions that passed in Test. The record is a job output, and it is a file on the GitHub release
+  # (tested-with.json). Staging and Production compare their own versions with this set before they deploy.
+  # The job fails if the E2E run did not record all four versions, or if the suite did not test this release.
+  # Then Staging does not start. It needs contents: write for the upload to the release.
+  tested-set:
+    needs: [version, e2e]
+    if: ${{ !cancelled() && needs.e2e.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      json: ${{ steps.record.outputs.json }}
+    steps:
+      - id: record
+        uses: jross24/lab-workflows/actions/tested-with@main
+        with:
+          tag: ${{ needs.version.outputs.tag }}
+          version: ${{ needs.version.outputs.version }}
+          service: ${{ needs.version.outputs.service }}
+          commit: ${{ github.sha }}
+          e2e-commit: ${{ needs.e2e.outputs.commit }}
+          web: ${{ needs.e2e.outputs.web-version }}
+          catalogue: ${{ needs.e2e.outputs.catalogue-version }}
+          account: ${{ needs.e2e.outputs.account-version }}
+          core: ${{ needs.e2e.outputs.core-version }}
+      - name: attach the record to the GitHub release and write the summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          RECORD: ${{ steps.record.outputs.json }}
+        run: |
+          printf '%s\n' "$RECORD" > tested-with.json
+          gh release upload "$TAG" tested-with.json --repo "$GITHUB_REPOSITORY" --clobber
+          {
+            echo "### Tested set of ${TAG}"
+            echo
+            echo "| Application | Version that passed in Test |"
+            echo "| --- | --- |"
+            jq -r '.versions | to_entries[] | "| \(.key) | `\(.value)` |"' tested-with.json
+            echo
+            echo "The record is the file \`tested-with.json\` on the GitHub release ${TAG}."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Releases the lock of Test. It runs when the suite passed, when it failed, when deploy-test failed
   # and when the run is cancelled, but not when the lock job never ran. The release of the lock
   # never fails because of the lock itself. If this job cannot run, the lock expires after 40 minutes.
+  # After "Re-run failed jobs" of a failed suite, this job runs again, because it needs the suite.
   unlock-test:
     needs: [lock-test, deploy-test, e2e]
     if: ${{ always() && needs.lock-test.result != 'skipped' }}
@@ -226,18 +311,28 @@ jobs:
           mask-aws-account-id: true
       - uses: jross24/lab-workflows/actions/lock-release@main
 
-  # Staging needs a passed E2E suite. With run-e2e set to false, a skipped suite is accepted, but only
-  # when Test was deployed. A deploy-test that failed also skips the suite, and that must stop the release.
+  # Staging needs a passed E2E suite and a recorded tested set. With run-e2e set to false, a skipped suite is
+  # accepted, but only when Test was deployed. A deploy-test that failed also skips the suite, and that must stop the release.
+  #
+  # The group deploy-staging lets one deployment to Staging of this repository run at a time. A newer release waits.
+  # The group is shared with the redeploy workflow. The smoke check runs inside this job, and so no other deployment
+  # to Staging can change the service between the deployment and the check.
+  #
+  # The limit is 25 minutes: 15 for the deployment (Staging moves the traffic all at once, like Test) and 10 for the checks
+  # and the smoke subset. The smoke subset needs about 2 minutes. A composite action cannot set a limit for its own steps.
   deploy-staging:
-    needs: [version, build, deploy-test, e2e]
+    needs: [version, build, deploy-test, e2e, tested-set]
     if: >-
       ${{ !cancelled()
       && needs.deploy-test.result == 'success'
-      && (needs.e2e.result == 'success' || (needs.e2e.result == 'skipped' && !inputs.run-e2e)) }}
+      && ((needs.e2e.result == 'success' && needs.tested-set.result == 'success')
+        || (needs.e2e.result == 'skipped' && !inputs.run-e2e)) }}
     runs-on: ubuntu-latest
     environment: staging
-    # Staging moves the traffic all at once, like Test. The limit leaves room for the CodeDeploy deployment.
-    timeout-minutes: 15
+    timeout-minutes: 25
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
     permissions:
       id-token: write
       contents: read
@@ -253,25 +348,72 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
+      - uses: jross24/lab-workflows/actions/preflight@main
+        with:
+          environment: staging
+          version: ${{ needs.version.outputs.version }}
+          tested-with: ${{ needs.tested-set.outputs.json }}
       - uses: jross24/lab-workflows/actions/deploy@main
         with:
           assembly: cdk-out-${{ needs.version.outputs.tag }}.zip
           digest: ${{ needs.build.outputs.digest }}
           stage: Staging
           version: ${{ needs.version.outputs.version }}
+      # The smoke subset of the E2E suite. It only reads. A failure stops the promotion: deploy-production needs this job.
+      - uses: jross24/lab-e2e/actions/suite@main
+        with:
+          environment: staging
+          suite: smoke
+          service: ${{ needs.version.outputs.service }}
+          version: ${{ needs.version.outputs.version }}
+          fault-drill: ${{ vars.E2E_FAULT_DRILL }}
+
+  # A newer release that reached this point cancels the older releases that still wait for the production reviewer.
+  # The newer release contains their changes, so their approval has no use. The job never fails the release.
+  # It runs before deploy-production, so a reviewer sees one waiting release and not two.
+  supersede:
+    needs: [version, deploy-staging]
+    if: ${{ !cancelled() && needs.deploy-staging.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: jross24/lab-workflows/actions/supersede@main
+        continue-on-error: true
+        with:
+          tag: ${{ needs.version.outputs.tag }}
+          token: ${{ github.token }}
 
   # A service can release in steps with CodeDeploy, for example 10 percent of the traffic for 5 minutes and then all of it.
   # CloudFormation waits for the whole deployment, so this job needs more than 5 minutes. After an alarm, the rollback of the
-  # traffic and the rollback of the stack take more time. The limit of 30 minutes leaves room for both.
+  # traffic and the rollback of the stack take more time. The limit is 40 minutes: 30 for the deployment with room for a rollback,
+  # and 10 for the checks and the smoke subset.
   # The time that the job waits for a reviewer does not count. The limit starts when the job starts.
+  #
+  # The group deploy-production has two uses. One deployment to Production of this repository runs at a time, and the releases
+  # reach Production in the order of their start. A job that waits for the reviewer holds the group, so a newer release waits behind it
+  # (and the job supersede cancels the older one first). A third release replaces a second one that waits for the group.
+  #
+  # The checks run after the approval, right before the deployment. They read the state of Production at that time,
+  # and not the state at the time when the release was queued. A reviewer can approve hours later.
+  #
+  # A failed smoke check makes this job fail. The last step then writes the way back to the old version. The README explains why
+  # the job does not roll back by itself.
   deploy-production:
-    needs: [version, build, deploy-staging]
+    needs: [version, build, deploy-staging, tested-set, supersede]
+    if: ${{ !cancelled() && needs.deploy-staging.result == 'success' }}
     runs-on: ubuntu-latest
     environment: production
-    timeout-minutes: 30
+    timeout-minutes: 40
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
     permissions:
       id-token: write
       contents: read
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -284,9 +426,32 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
+      - id: preflight
+        uses: jross24/lab-workflows/actions/preflight@main
+        with:
+          environment: production
+          version: ${{ needs.version.outputs.version }}
+          tested-with: ${{ needs.tested-set.outputs.json }}
       - uses: jross24/lab-workflows/actions/deploy@main
         with:
           assembly: cdk-out-${{ needs.version.outputs.tag }}.zip
           digest: ${{ needs.build.outputs.digest }}
           stage: Production
           version: ${{ needs.version.outputs.version }}
+      # The smoke subset of the E2E suite, after the canary has moved all the traffic. It only reads. It changes no data.
+      - id: smoke
+        uses: jross24/lab-e2e/actions/suite@main
+        with:
+          environment: production
+          suite: smoke
+          service: ${{ needs.version.outputs.service }}
+          version: ${{ needs.version.outputs.version }}
+          fault-drill: ${{ vars.E2E_FAULT_DRILL }}
+      - name: propose the way back after a failed smoke check
+        if: ${{ failure() && steps.smoke.outcome == 'failure' }}
+        uses: jross24/lab-workflows/actions/propose-rollback@main
+        with:
+          service: ${{ needs.version.outputs.service }}
+          version: ${{ needs.version.outputs.version }}
+          previous: ${{ steps.preflight.outputs.previous-version }}
+          token: ${{ github.token }}

@@ -1,0 +1,48 @@
+name: preflight
+description: Checks the environment before a deployment. It compares the deployed versions with pipeline.json and with the tested set. It changes nothing.
+
+# The job must log in to AWS first. The role github-deploy needs ssm:GetParameters on /lab/*. The action only reads.
+# The caller must check out the repository first, for pipeline.json. The README explains every check.
+inputs:
+  environment:
+    description: The environment that the job deploys to. One of test, staging, production.
+    required: true
+  version:
+    description: The version that the job deploys, for example 0.4.0. Leave it empty for a dry run. The check of the release itself is then left out.
+    default: ''
+  mode:
+    description: >-
+      release stops when this release is older than the environment and when a tested neighbour is missing.
+      redeploy lets an older version go, and only warns about a tested neighbour. A rollback must not stop.
+    default: release
+  file:
+    description: The path of pipeline.json, relative to the workspace.
+    default: pipeline.json
+  tested-with:
+    description: The JSON text of the tested set (see the action tested-with). Empty means that no set was recorded.
+    default: ''
+  requires-override:
+    description: A JSON object such as {"core":">=9.9.9"}. It replaces "requires" of pipeline.json. Use it only for a dry run.
+    default: ''
+
+outputs:
+  previous-version:
+    description: The version of the service in the environment before the job. Empty if the service is not deployed there.
+    value: ${{ steps.check.outputs.previous-version }}
+  result:
+    description: pass or fail.
+    value: ${{ steps.check.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      env:
+        PF_ENVIRONMENT: ${{ inputs.environment }}
+        PF_VERSION: ${{ inputs.version }}
+        PF_MODE: ${{ inputs.mode }}
+        PF_PIPELINE_FILE: ${{ inputs.file }}
+        PF_TESTED_WITH: ${{ inputs.tested-with }}
+        PF_REQUIRES_OVERRIDE: ${{ inputs.requires-override }}
+      run: bash "$GITHUB_ACTION_PATH/preflight.sh" check

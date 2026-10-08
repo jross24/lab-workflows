@@ -29,6 +29,13 @@ jobs:
         run: bash actions/next-version/test.sh
       - name: test the lock script
         run: bash actions/lock/test.sh
+      # The next three scripts use jq, which the runner image has.
+      - name: test the preflight script
+        run: bash actions/preflight/test.sh
+      - name: test the supersede script
+        run: bash actions/supersede/test.sh
+      - name: test the propose-rollback script
+        run: bash actions/propose-rollback/test.sh
       - name: test the install-tool script
         run: bash actions/install-tool/test.sh
       - name: test the changed-paths script
