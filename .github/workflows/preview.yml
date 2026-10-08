@@ -192,6 +192,9 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::${{ secrets.PR_ACCOUNT_ID_DEV }}:role/cdk-hnb659fds-deploy-role-${{ secrets.PR_ACCOUNT_ID_DEV }}-${{ vars.AWS_REGION }}
           role-chaining: true
+          # The action tags the new session by default. A tagged session needs sts:TagSession in the trust policy
+          # of the bootstrap role, and that policy does not have it. The first run of destroy failed for this reason.
+          role-skip-session-tagging: true
           aws-region: ${{ vars.AWS_REGION }}
           mask-aws-account-id: true
       - name: remove the stack of this pull request
