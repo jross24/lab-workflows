@@ -1,0 +1,49 @@
+{
+  "service": "core",
+  "consumers": ["catalogue", "account"],
+  "endpoints": {
+    "GET /items": {
+      "request": { "required": [], "optional": ["query:limit"] },
+      "responses": {
+        "200": {
+          "type": "object",
+          "required": ["service", "version", "items"],
+          "properties": {
+            "service": { "type": "string" },
+            "version": { "type": "string" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "name"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "name": { "type": "string" },
+                  "price": { "type": "number" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "GET /items/{id}": {
+      "request": { "required": ["path:id"], "optional": [] },
+      "responses": {
+        "200": {
+          "type": "object",
+          "required": ["id", "name"],
+          "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" }
+          }
+        },
+        "404": {
+          "type": "object",
+          "required": ["message"],
+          "properties": { "message": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

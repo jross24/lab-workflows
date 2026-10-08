@@ -1,0 +1,28 @@
+name: contract check
+description: >-
+  Checks contract.json and expectations.json of the service repository against the releases that run in Production.
+  It needs no AWS access. The caller must check out the repository first. The README section "Contract tests" explains the rules.
+
+inputs:
+  token:
+    description: A token that can read releases and the labels of the pull request, for example github.token. The job needs pull-requests - read.
+    required: true
+  pr-number:
+    description: The number of the pull request. The check reads its labels. The default is the pull request of the event.
+    required: false
+    default: ${{ github.event.pull_request.number }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: 22
+    # The script comes from this repository (the path of the action) and not from the pull request.
+    # The files that it checks come from the working directory, which holds the pull request.
+    - name: check the contracts
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+      run: node "$GITHUB_ACTION_PATH/../contract/cli.mjs" pr-check
