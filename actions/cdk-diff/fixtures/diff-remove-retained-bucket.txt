@@ -1,0 +1,9 @@
+AI agent detected
+Stack Fx (fx)
+Resources
+[-] AWS::S3::Bucket Keep Keep orphan
+
+
+
+✨  Number of stacks with differences: 1
+
