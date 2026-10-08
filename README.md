@@ -7,7 +7,7 @@ The pipeline has three reusable workflows and several composite actions.
 
 | File | What it does |
 | --- | --- |
-| `.github/workflows/pr.yml` | Checks a pull request: lint, typecheck, tests, `cdk synth`, a dependency check, a secret scan and `actionlint`. It has no AWS access. |
+| `.github/workflows/pr.yml` | Checks a pull request: lint, typecheck, tests, `cdk synth`, a dependency check, a secret scan, `actionlint` and the `cdk diff` comment. Only the diff job has AWS access, and it can only read. |
 | `.github/workflows/release.yml` | Releases a push to `main`: version tag, one build, then Test (with the lock and the E2E gate), Staging and Production. |
 | `.github/workflows/redeploy.yml` | Deploys an old release again. This is the rollback path. |
 | `actions/next-version` | Works out the next version from the commit titles. |
@@ -358,10 +358,16 @@ on:
   pull_request:
 permissions:
   contents: read
+  id-token: write
+  pull-requests: write
 jobs:
   pr:
     uses: jross24/lab-workflows/.github/workflows/pr.yml@main
+    secrets: inherit
 ```
+
+The `pr` caller needs the two extra permissions and the secrets, because the job `diff` reads the deployed stack and writes a comment.
+See "The cdk diff comment" for the details. If the caller grants less than the called workflow asks, GitHub does not start the run at all, and the required check never reports.
 
 ```yaml
 # .github/workflows/release.yml
