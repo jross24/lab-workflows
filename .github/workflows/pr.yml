@@ -131,7 +131,8 @@ jobs:
   # Fails when a shared file of the service is not byte-equal to the file in lab-workflows at the commit that
   # shared.lock.json names (lab-platform#26). The check compares with the PINNED commit and not with main, so a pull request
   # never fails because lab-workflows moved. It fails only when someone edits a copy by hand or forgets a file. The message
-  # names the file and the sync command. A repository without a pin file gets a notice, and the job passes.
+  # names the file and the sync command. A repository that has lib/tracing.ts (the four services) must have a pin file,
+  # and the job fails without it. Any other repository without a pin file gets a notice, and the job passes.
   # The scripts come from this repository at tools-ref. The files to compare with come from the pinned commit. The pin
   # cannot name another repository: the checkout below always uses jross24/lab-workflows. The name of the job is part
   # of the name of the required check: pr / shared.
@@ -151,7 +152,7 @@ jobs:
           path: .lab-tools
           persist-credentials: false
       - id: pin
-        run: node .lab-tools/actions/shared-files/cli.mjs pin
+        run: node .lab-tools/actions/shared-files/cli.mjs pin --require-if lib/tracing.ts
       - if: steps.pin.outputs.present == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

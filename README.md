@@ -1975,7 +1975,8 @@ The owner asked for a check in [lab-platform#26](https://github.com/jross24/lab-
    It removes a file that the old pin owned and the new commit dropped. It never removes another file. It does not commit.
 5. **A weekly report.** The workflow `shared-files.yml` lists the services whose pin is behind (see "The weekly report").
 
-The job also guards three cases. A repository with no `shared.lock.json` gets a notice and the job passes, so a repository that does not use the mechanism is not blocked.
+The job also guards three cases. A repository with no `shared.lock.json` fails the job when it has `lib/tracing.ts`, which marks a service. The message names the sync command.
+A repository without that file gets a notice and the job passes, so a repository that does not use the mechanism is not blocked.
 A `shared.lock.json` that the check cannot read fails the job. The pin can name only this repository: the checkout in `pr.yml` is fixed to `jross24/lab-workflows`, and the script refuses another `repository` in the pin.
 
 ### Which files are shared
