@@ -38,6 +38,7 @@ jobs:
   # tags and make the same version. The job is short, so a run waits a few seconds at most.
   version:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     concurrency:
       group: release-version
       cancel-in-progress: false
@@ -73,6 +74,7 @@ jobs:
   build:
     needs: [version]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     outputs:
@@ -218,6 +220,7 @@ jobs:
     needs: [e2e]
     if: ${{ always() && needs.e2e.result != 'skipped' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions: {}
     steps:
       - name: write the summary
@@ -255,6 +258,7 @@ jobs:
     needs: [version, e2e]
     if: ${{ !cancelled() && needs.e2e.result == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: write
     outputs:

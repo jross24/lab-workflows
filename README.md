@@ -8,8 +8,14 @@ The pipeline has three reusable workflows and several composite actions.
 | File | What it does |
 | --- | --- |
 | `.github/workflows/pr.yml` | Checks a pull request: lint, typecheck, tests, `cdk synth`, a dependency check, a secret scan and `actionlint`. It has no AWS access. |
-| `.github/workflows/release.yml` | Releases a push to `main`: version tag, one build, then Test (with the lock and the E2E gate), Staging and Production. |
-| `.github/workflows/redeploy.yml` | Deploys an old release again. This is the rollback path. |
+| `.github/workflows/release.yml` | Releases a push to `main`: version tag, one build, then Test (with the lock and the E2E gate), Staging and Production. Each environment has checks before the deployment and a smoke check after it. |
+| `.github/workflows/redeploy.yml` | Deploys an old release again. This is the rollback path. It takes the Test lock for Test. |
+| `.github/workflows/check.yml` | A dry run of the checks before a deployment. It deploys nothing. |
+| `actions/pipeline-info` | Reads `pipeline.json` of the service repository and gives the name of the service. |
+| `actions/preflight` | The checks before a deployment: the providers, the tested set and "no step back". The script and its tests are in the same folder. |
+| `actions/tested-with` | Makes the record of the versions that passed in Test (`tested-with.json`). |
+| `actions/supersede` | Cancels the older releases that wait for the production reviewer. |
+| `actions/propose-rollback` | After a failed smoke check in Production, it starts the redeploy of the earlier version. That run waits for the reviewer. |
 | `actions/next-version` | Works out the next version from the commit titles. |
 | `actions/deploy` | Deploys one CDK stage from the cloud assembly of the build job. |
 | `actions/lock-acquire` | Takes the lock of the shared Test environment. It waits when another release holds the lock. |
