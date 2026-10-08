@@ -15,11 +15,29 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The two tools come from actions/install-tool. The pins (version, url, SHA-256) are in actions/install-tool/tools.txt.
+      # This repository uses its own copy of the action (the path ./actions/install-tool), so a pull request tests its own change.
+      - name: install actionlint
+        uses: ./actions/install-tool
+        with:
+          tool: actionlint
+      - name: install gitleaks
+        uses: ./actions/install-tool
+        with:
+          tool: gitleaks
       - name: test the next-version script
         run: bash actions/next-version/test.sh
       - name: test the lock script
         run: bash actions/lock/test.sh
-      # The two linters run only if the runner image has them. This repository installs nothing.
+      - name: test the install-tool script
+        run: bash actions/install-tool/test.sh
+      - name: test the changed-paths script
+        run: bash actions/changed-paths/test.sh
+      - name: test the secret-scan script
+        env:
+          REQUIRE_GITLEAKS: '1'
+        run: bash actions/secret-scan/test.sh
+      # shellcheck runs only if the runner image has it. The image has it today.
       - name: shellcheck
         run: |
           if command -v shellcheck > /dev/null; then
@@ -27,10 +45,6 @@ jobs:
           else
             echo "::notice::shellcheck is not on this runner. Skipped."
           fi
+      # actionlint is not optional. It checks every workflow file, and it runs shellcheck on the run: scripts.
       - name: actionlint
-        run: |
-          if command -v actionlint > /dev/null; then
-            actionlint
-          else
-            echo "::notice::actionlint is not on this runner. Skipped."
-          fi
+        run: actionlint

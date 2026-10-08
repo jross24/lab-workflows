@@ -1,0 +1,39 @@
+name: changed paths
+description: Tells whether a pull request changes a file under some paths. The caller must check out the repository with the full history (fetch-depth 0).
+
+inputs:
+  paths:
+    description: The paths to look at, separated by spaces, for example ".github/".
+    required: true
+  label:
+    description: The name of the check that depends on the answer. It appears in the notice.
+    required: false
+    default: the check
+  base:
+    description: The base commit. The default is the base commit of the pull request.
+    required: false
+    default: ${{ github.event.pull_request.base.sha }}
+  head:
+    description: The head commit. The default is the head commit of the pull request.
+    required: false
+    default: ${{ github.event.pull_request.head.sha }}
+
+outputs:
+  changed:
+    description: The text true if a file under the paths changed or if the action cannot tell. Otherwise false.
+    value: ${{ steps.paths.outputs.changed }}
+  count:
+    description: The number of changed files, or unknown.
+    value: ${{ steps.paths.outputs.count }}
+
+runs:
+  using: composite
+  steps:
+    - id: paths
+      shell: bash
+      env:
+        BASE: ${{ inputs.base }}
+        HEAD: ${{ inputs.head }}
+        PATHS: ${{ inputs.paths }}
+        LABEL: ${{ inputs.label }}
+      run: bash "$GITHUB_ACTION_PATH/changed-paths.sh" "$BASE" "$HEAD" "$PATHS" "$LABEL"

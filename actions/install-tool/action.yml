@@ -1,0 +1,21 @@
+name: install tool
+description: Installs a tool that has a pin in tools.txt. The script checks the SHA-256 of the download against the pin and adds the tool to the PATH.
+
+inputs:
+  tool:
+    description: The name of the tool in tools.txt, for example actionlint.
+    required: true
+
+outputs:
+  version:
+    description: The version that was installed.
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      env:
+        TOOL: ${{ inputs.tool }}
+      run: bash "$GITHUB_ACTION_PATH/install-tool.sh" "$TOOL"
