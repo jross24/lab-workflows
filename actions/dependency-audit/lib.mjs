@@ -130,7 +130,7 @@ function footer({ minSeverity, runUrl }) {
 
 export function renderBody(findings, context) {
   return [
-    `The scheduled \`npm audit\` found ${findings.length} advisories that nobody accepted. It read the lockfile of the default branch of each repository.`,
+    `The scheduled \`npm audit\` found ${findings.length} ${findings.length === 1 ? 'advisory' : 'advisories'} that nobody accepted. It read the lockfile of the default branch of each repository.`,
     '',
     table(findings),
     '',
