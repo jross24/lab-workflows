@@ -24,6 +24,11 @@ on:
         type: string
         required: false
         default: /products
+      smoke-expect-status:
+        description: The HTTP status that the smoke test must see. A private API with IAM authorization answers an unsigned call with 403.
+        type: string
+        required: false
+        default: '200'
       tools-ref:
         description: The ref of lab-workflows that the scripts come from. Leave the default. A test of a branch sets it.
         type: string
@@ -171,6 +176,7 @@ jobs:
           echo "url=${base%/}" >> "$GITHUB_OUTPUT"
       # The URL must answer with HTTP 200. The service answers 502 when it cannot call core.
       - name: smoke test
+        if: ${{ inputs.smoke-expect-status == '200' }}
         env:
           URL: ${{ steps.url.outputs.url }}${{ inputs.smoke-path }}
         run: |
@@ -179,6 +185,28 @@ jobs:
           echo
           echo "### Preview answered" >> "$GITHUB_STEP_SUMMARY"
           echo "\`GET ${URL}\` answered HTTP 200." >> "$GITHUB_STEP_SUMMARY"
+      # A private API answers an unsigned call with 403, and a missing route with 404. So the expected status 403 shows
+      # that the API is up and that the route has its authorization. The test tries again for about one minute.
+      - name: smoke test for a private API
+        if: ${{ inputs.smoke-expect-status != '200' }}
+        env:
+          URL: ${{ steps.url.outputs.url }}${{ inputs.smoke-path }}
+          EXPECTED: ${{ inputs.smoke-expect-status }}
+        run: |
+          set -euo pipefail
+          code=000
+          for attempt in $(seq 1 12); do
+            code="$(curl --silent --output "$RUNNER_TEMP/smoke.json" --write-out '%{http_code}' --max-time 30 "$URL" || true)"
+            echo "Attempt ${attempt}: HTTP ${code}"
+            if [[ "$code" == "$EXPECTED" ]]; then break; fi
+            sleep 5
+          done
+          if [[ "$code" != "$EXPECTED" ]]; then
+            echo "::error::GET ${URL} answered HTTP ${code}. The test expected HTTP ${EXPECTED}."
+            exit 1
+          fi
+          echo "### Preview answered" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`GET ${URL}\` answered HTTP ${code}, as expected." >> "$GITHUB_STEP_SUMMARY"
 
   destroy:
     needs: [plan]

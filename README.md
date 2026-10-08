@@ -820,6 +820,9 @@ jobs:
 ```
 
 The input `smoke-path` is the path that must answer HTTP 200. The default is `/products`.
+The input `smoke-expect-status` is the status that the path must give. The default is `200`.
+A private API with IAM authorization, such as the one of core, answers an unsigned call with 403 and a path that does not exist with 404. So core sets `smoke-path: /items` and `smoke-expect-status: '403'`.
+The test then shows that the API is up and that the route has its authorization. It does not call the API with a signature, because the role `github-preview` has no `execute-api:Invoke`.
 The stack of the service must have the name `<repository>-<namespace>`, and it must have the output `ApiUrl`.
 
 ### What the real runs showed
