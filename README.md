@@ -63,7 +63,7 @@ You can also compare the result in AWS. The `CodeSha256` of the Lambda function 
 3. `lock-test` takes the lock of the Test environment. It waits when another release holds the lock.
 4. `deploy-test` makes sure that this run holds the lock, runs the checks before a deployment, and deploys the stage `Test` in the GitHub environment `test`.
 5. `e2e` runs the end-to-end suite of [lab-e2e](https://github.com/jross24/lab-e2e) against Test.
-6. `tested-set` records the four versions that the suite tested. It attaches them to the GitHub release as `tested-with.json`.
+6. `tested-set` records the four versions that the suite tested. A release of another service adds its own version. The job attaches the record to the GitHub release as `tested-with.json`.
 7. `unlock-test` releases the lock. It runs after a pass, after a failure and after a cancel.
 8. `deploy-staging` runs the checks, deploys the stage `Staging` in the GitHub environment `staging`, and runs the smoke subset of the E2E suite. It starts only if `e2e` and `tested-set` passed. With `run-e2e: false` it starts after `deploy-test` passed.
 9. `supersede` cancels the older releases of this repository that still wait for the production reviewer.
@@ -840,7 +840,7 @@ A range is one or more comparators with a space between them. All of them must h
 Examples: `>=0.5.0`, `>=0.5.0 <1.0.0`, `1.2.3`. A caret range such as `^0.5.0` is not supported. A wrong range stops the release with a message that names the file.
 
 The job `version` reads and checks the file before it makes the tag. A key that the pipeline does not know is an error, so a typo such as `require` does not pass in silence.
-The lab names the repository of a service `lab-svc-<service>`, except `web`, which is `lab-web`. The messages use this rule to say where to release a missing version.
+The lab names the repository of a service `lab-svc-<service>`, except `web`, which is `lab-web`, and `flags`, which is `lab-flags`. The messages use this rule to say where to release a missing version.
 
 The pipeline files of the four services today:
 
@@ -995,6 +995,8 @@ The record has this form:
 {"release":"v0.4.0","service":"web","version":"0.4.0","commit":"<sha>","e2eCommit":"<sha>",
  "versions":{"web":"0.4.0","catalogue":"0.3.1","account":"0.3.1","core":"0.5.1"}}
 ```
+
+The suite reports web, catalogue, account and core only, so a release of another service, such as `flags`, has no version in the report. The record of that release also holds its own version, for example `"flags":"0.1.0"`. The check reads that entry like any other one.
 
 ### What this guarantees, and what it does not
 
