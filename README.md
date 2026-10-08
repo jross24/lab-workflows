@@ -1739,8 +1739,9 @@ So the four service repositories have Dependabot alerts on. A new service reposi
 ### Accepted advisories: a short list with dates
 
 **Why the list exists.** The dependency check judges only what a pull request adds. A new repository has an empty base, so every dependency counts as new.
-Then the check fails on a finding that nobody can fix. This happened to the first pull request of `lab-flags`. `aws-cdk-lib` 2.272.0, the newest release, bundles `brace-expansion` 5.0.9.
-That copy has two high advisories, GHSA-6j4f-fj2g-mc7p and GHSA-qhr7-859c-m2p7, and no patched `aws-cdk-lib` exists ([lab-platform#15](https://github.com/jross24/lab-platform/issues/15)).
+Then the check fails on a finding that nobody can fix. This happened to the first pull request of `lab-flags`. `aws-cdk-lib` 2.272.0, the newest release, bundled `brace-expansion` 5.0.9.
+That copy had two high advisories, GHSA-6j4f-fj2g-mc7p and GHSA-qhr7-859c-m2p7, and no patched `aws-cdk-lib` existed. The lab accepted both advisories for a short time.
+Then `aws-cdk-lib` 2.273.0 came out. It bundles `brace-expansion` 5.0.12, and all lab repositories use it now ([lab-platform#15](https://github.com/jross24/lab-platform/issues/15)). The lab removed both entries, so the list is empty.
 A new repository could not merge its first pull request until someone fixed an upstream package.
 
 **What the list is.** The file `accepted-advisories.json` in the root of this repository holds the advisories that the lab accepts for now. Each entry has five fields, and all five are required:
