@@ -1,0 +1,30 @@
+AI agent detected
+WARNING Both 'UpdateReplacePolicy' and 'DeletionPolicy' are needed to protect resource from deletion (CloudFormation Validate)
+   Fx/Keep (Keep) aws-cdk-lib.CfnResource
+   Acknowledge with 'CloudFormation-Validate::W3011'
+Stack Fx (fx)
+Resources
+[~] AWS::DynamoDB::Table Orders Orders replace
+ ├─ [~] AttributeDefinitions
+ │   └─ @@ -1,6 +1,6 @@
+ │      [ ] [
+ │      [ ]   {
+ │      [-]     "AttributeName": "pk",
+ │      [+]     "AttributeName": "id",
+ │      [ ]     "AttributeType": "S"
+ │      [ ]   }
+ │      [ ] ]
+ └─ [~] KeySchema (requires replacement)
+     └─ @@ -1,6 +1,6 @@
+        [ ] [
+        [ ]   {
+        [-]     "AttributeName": "pk",
+        [+]     "AttributeName": "id",
+        [ ]     "KeyType": "HASH"
+        [ ]   }
+        [ ] ]
+
+
+
+✨  Number of stacks with differences: 1
+
