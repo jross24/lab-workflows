@@ -7,7 +7,7 @@ The pipeline has reusable workflows and several composite actions.
 
 | File | What it does |
 | --- | --- |
-| `.github/workflows/pr.yml` | Checks a pull request: lint, typecheck, tests, `cdk synth`, a dependency check, a secret scan, `actionlint`, the contract check and the `cdk diff` comment. Only the diff job has AWS access, and it can only read. |
+| `.github/workflows/pr.yml` | Checks a pull request: lint, typecheck, tests, `cdk synth`, a dependency check, a secret scan, `actionlint`, the contract check, the check of the shared files and the `cdk diff` comment. Only the diff job has AWS access, and it can only read. |
 | `.github/workflows/release.yml` | Releases a push to `main`: version tag, one build, then Test (with the lock and the E2E gate), Staging and Production. Each environment has checks before the deployment and a smoke check after it. After Production it records the version on the release (the production marker). |
 | `.github/workflows/redeploy.yml` | Deploys an old release again. This is the rollback path. It takes the Test lock for Test. After a redeploy to Production it records the version on the release (the production marker). |
 | `.github/workflows/check.yml` | A dry run of the checks before a deployment. It deploys nothing. |
@@ -25,6 +25,9 @@ The pipeline has reusable workflows and several composite actions.
 | `actions/changed-paths` | Tells whether a pull request changes a file under some paths, for example `.github/`. |
 | `.github/workflows/dependency-audit.yml` | Runs `npm audit` each week on the lockfile of `main` of each lab repository. It opens one issue, or comments on it, for an advisory that nobody accepted. See "Scheduled checks". |
 | `.github/workflows/tool-pins.yml` | Compares the pins of `actions/install-tool/tools.txt` with the latest releases each month. It opens one issue, or comments on it, for a pin that is behind. It changes no pin. See "Scheduled checks". |
+| `shared/` | The one true copy of the files that the four service repositories share. A service pins a commit of this repository and checks its copies against it. See "Shared files". |
+| `.github/workflows/shared-files.yml` | Lists the services whose pin of the shared files is behind each week. It opens one issue, or comments on it. See "Shared files". |
+| `actions/shared-files` | The sync script, the check and the report, with their tests. |
 | `actions/dependency-audit`, `actions/tool-pins`, `actions/tracking-issue` | The scripts and the tests behind the two scheduled workflows. `tracking-issue` keeps the one open issue of a check. |
 | `.github/workflows/diff.yml` | Shows the `cdk diff` against Production as one comment on a pull request, and blocks a delete of a stateful resource. See "The cdk diff comment". |
 | `actions/cdk-diff` | The scripts and the tests behind `diff.yml`. |
@@ -1854,6 +1857,7 @@ The CI of this repository downloads both tools on each run. So a wrong hash or a
 
 Two workflows in this repository run on a timer. They watch for two things that no pull request changes: a new advisory against a lockfile that stays the same, and a tool pin that falls behind its tool.
 Each check keeps one open issue and nothing else. A check never changes a file, a pin or a dependency.
+A third scheduled check, `shared-files.yml`, has its own section: "Shared files".
 The owner asked for them in [lab-platform#38](https://github.com/jross24/lab-platform/issues/38).
 
 ### The dependency audit
@@ -1941,10 +1945,97 @@ DRY_RUN=true ISSUE_REPO=jross24/lab-workflows REPOSITORIES="lab-web lab-flags" n
 DRY_RUN=true ISSUE_REPO=jross24/lab-workflows node actions/tool-pins/cli.mjs run
 ```
 
+## Shared files
+
+Nine files in `lib/` and eight test files are the same in the four service repositories (`lab-svc-core`, `lab-svc-catalogue`, `lab-svc-account` and `lab-web`).
+They hold the gradual release, the dashboard, the log line, the metric line and the tracing. Before this section existed, nothing checked that the copies stayed equal.
+The owner asked for a check in [lab-platform#26](https://github.com/jross24/lab-platform/issues/26).
+
+### The mechanism
+
+1. **One true copy.** The directory `shared/` of this repository holds the files. `shared/lib/logger.ts` is `lib/logger.ts` in a service. `shared/test/tracing.test.ts` is `test/tracing.test.ts`.
+   The set of shared files is every file below `shared/`. There is no list to keep. A new file in `shared/` joins the set.
+2. **A pin in each service.** The file `shared.lock.json` in the root of a service names the commit of this repository that its copies come from.
+
+   ```json
+   {
+     "repository": "jross24/lab-workflows",
+     "commit": "<40 characters>"
+   }
+   ```
+
+3. **A check in the pull request.** The job `shared` of `pr.yml` reads the pin. It checks out this repository at the pinned commit, and compares each file below `shared/` with the copy in the service, byte by byte.
+   It compares with the PINNED commit and not with `main`. So a pull request never fails because this repository moved. It fails only when someone edits a copy by hand, or forgets a file.
+   The message names each file, the pinned commit and the sync command.
+4. **A sync script.** `node actions/shared-files/sync.mjs <path to the service> [commit]` copies the files of a commit into a service and writes the pin. Run it in a clone of this repository.
+   The default commit is `origin/main`. The script reads the files from the git objects of the commit, so a dirty file or a line ending setting of your clone cannot change them.
+   It removes a file that the old pin owned and the new commit dropped. It never removes another file. It does not commit.
+5. **A weekly report.** The workflow `shared-files.yml` lists the services whose pin is behind (see "The weekly report").
+
+The job also guards three cases. A repository with no `shared.lock.json` gets a notice and the job passes, so a repository that does not use the mechanism is not blocked.
+A `shared.lock.json` that the check cannot read fails the job. The pin can name only this repository: the checkout in `pr.yml` is fixed to `jross24/lab-workflows`, and the script refuses another `repository` in the pin.
+
+### Which files are shared
+
+| Where | Files |
+| --- | --- |
+| `shared/lib/` | `gradual-release.ts`, `service-dashboard.ts`, `instrument.ts`, `logger.ts`, `metrics.ts`, `tracing.ts`, `xray-exporter.ts`, `sigv4.ts` and `function-defaults.ts`. |
+| `shared/test/` | `function-defaults.test.ts`, `gradual-release.test.ts`, `service-dashboard.test.ts`, `sigv4.test.ts`, `tracing.test.ts`, `xray-exporter.test.ts`, `contract-schema.test.ts` and `support/contract-schema.ts`. |
+
+Three tests are not shared: `instrument.test.ts`, `logger.test.ts` and `metrics.test.ts`. They name the service and the route (`core`, `GET /items`), so each service has its own.
+`lib/namespace.ts` and `test/namespace.test.ts` are not shared either. They hold the names of the stack and of the SSM parameters of one service, so they differ by design.
+
+`instrument.ts` and `logger.ts` carry the optional fields `flags`, `flagsSource` and `flagsOverridden`. Catalogue added them for the feature flag `show-discounts` (lab-svc-catalogue#19), and the other three copies had drifted from it.
+A handler that reports no flags writes none of the three fields, so the other services behave as before. The tests of the fields are in the catalogue tests of `instrument` and `logger`.
+
+### Change a shared file
+
+1. Change the file below `shared/` in a pull request of this repository, and merge it.
+2. In a clone of this repository, run `git pull`. Then, for each service, run `node actions/shared-files/sync.mjs ../lab-svc-core` (and the same for the other three).
+3. Review the diff of the service. Open one pull request in each service, with the title `fix:` or `chore:`. Each merge starts a release of that service.
+
+A service that has not synced yet is not broken. Its pin still names the old commit, so its pull requests still pass.
+The weekly report tells the owner which services are behind.
+
+To undo a hand edit and keep the pin, run the sync command with the pinned commit at the end: `node actions/shared-files/sync.mjs ../lab-web <commit>`.
+
+### The weekly report
+
+The workflow `shared-files.yml` runs on Monday at 05:23 UTC, and on `workflow_dispatch`. For each service it reads `shared.lock.json` on `main` through the GitHub API.
+It asks GitHub for the latest commit that changed `shared/`. A service is behind when that commit is not the pin and not an ancestor of the pin. A service with no pin file is reported too.
+
+It keeps ONE open issue in this repository, like the dependency audit (see "How the one issue works"). The marker is `<!-- shared-files -->` and the key is `service@<first 7 characters of the latest commit>`.
+When `shared/` changes again and a service is still behind, the key changes and the run adds a comment. It never changes a file or a pin.
+If GitHub does not know the pinned commit, or the pin file is broken, the run fails and names the service.
+
+The `workflow_dispatch` run has two inputs: `repositories` (names separated by spaces; empty means the four services) and `dry-run`.
+
+### Why not an npm package
+
+A package needs a registry: public npm, or GitHub Packages with a token for CI. That is a new supply-chain surface that the lab would have to secure and update.
+The CDK code and the Lambda code change at different speeds, and a construct library ties to a version of `aws-cdk-lib`. The owner decided on no package.
+A pinned copy needs no registry, no token and no install. The reviewer sees the exact bytes in the diff of the pull request.
+
+The cost is the same as before for a change: one pull request and one release in each service. The sync script makes each pull request one command. The pin makes the check always able to pass.
+
+### What the check does not do
+
+- It does not run the tests of `shared/` in this repository. They need the dependencies of a service (`vitest`, OpenTelemetry, `aws-cdk-lib`), and this repository has no `package.json`. Each service runs the tests on its copy, which has the same bytes.
+- It does not check a file that a service has in addition to the shared files.
+- It does not force a service to take a newer pin. Only the weekly report applies pressure.
+
+### Tests
+
+```sh
+node --test actions/shared-files/lib.test.mjs actions/shared-files/sync.test.mjs actions/shared-files/cli.test.mjs
+```
+
+The tests use temporary folders, a real git repository in a temporary folder, and a fake `gh`. They use no network.
+
 ## Checks of this repository
 
 The `ci` workflow runs on each pull request. It installs `actionlint` and `gitleaks` with `actions/install-tool`.
-It runs the tests of the scripts: next-version, lock, preflight, supersede, propose-rollback, install-tool, changed-paths and secret-scan. It also runs the tests of the Node scripts for the diff comment, the preview, the contract check and the accepted advisories, the tests of the check of the published parameters, and the tests of the scheduled checks (see "Scheduled checks"). The new tests need `jq`, which the runner image has. It also runs `shellcheck` and `actionlint`.
+It runs the tests of the scripts: next-version, lock, preflight, supersede, propose-rollback, install-tool, changed-paths and secret-scan. It also runs the tests of the Node scripts for the diff comment, the preview, the contract check and the accepted advisories, the tests of the check of the published parameters, and the tests of the scheduled checks and of the shared files (see "Scheduled checks" and "Shared files"). The new tests need `jq`, which the runner image has. It also runs `shellcheck` and `actionlint`.
 The step "check the list of accepted advisories" fails when an entry of `accepted-advisories.json` is past its date or lacks a field.
 
 `actionlint` is not optional. It checks every workflow file in `.github/workflows/`, and it runs `shellcheck` on the `run:` scripts.

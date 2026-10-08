@@ -5,6 +5,7 @@ name: pr
 # Production with a role that can only read. The README section "The cdk diff comment" explains the security model.
 # The caller must give these permissions: contents: read, id-token: write, pull-requests: write.
 # The caller must pass its secrets with "secrets: inherit".
+# The job shared compares the shared files of the service with the commit of lab-workflows that shared.lock.json names. It needs no AWS access.
 # The job contracts compares contract.json and expectations.json with the releases that run in Production. It needs no AWS access.
 on:
   workflow_call:
@@ -126,6 +127,40 @@ jobs:
       - uses: jross24/lab-workflows/actions/contract-check@main
         with:
           token: ${{ github.token }}
+
+  # Fails when a shared file of the service is not byte-equal to the file in lab-workflows at the commit that
+  # shared.lock.json names (lab-platform#26). The check compares with the PINNED commit and not with main, so a pull request
+  # never fails because lab-workflows moved. It fails only when someone edits a copy by hand or forgets a file. The message
+  # names the file and the sync command. A repository without a pin file gets a notice, and the job passes.
+  # The scripts come from this repository at tools-ref. The files to compare with come from the pinned commit. The pin
+  # cannot name another repository: the checkout below always uses jross24/lab-workflows. The name of the job is part
+  # of the name of the required check: pr / shared.
+  shared:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jross24/lab-workflows
+          ref: ${{ inputs.tools-ref }}
+          path: .lab-tools
+          persist-credentials: false
+      - id: pin
+        run: node .lab-tools/actions/shared-files/cli.mjs pin
+      - if: steps.pin.outputs.present == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jross24/lab-workflows
+          ref: ${{ steps.pin.outputs.commit }}
+          path: .lab-shared
+          persist-credentials: false
+      - if: steps.pin.outputs.present == 'true'
+        run: node .lab-tools/actions/shared-files/cli.mjs check .lab-shared/shared .
 
   # Shows what a release would change in Production, as one comment that each push updates (lab-platform#13).
   # A delete or a replacement of a stateful resource fails this job until the pull request has the label

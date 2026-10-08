@@ -1,0 +1,60 @@
+name: shared-files
+
+# A weekly report of the service repositories whose copy of the shared files is behind lab-workflows (lab-platform#26).
+# The directory shared/ of this repository holds the one true copy of the shared files. Each service repository pins the
+# commit of this repository that its copies come from (shared.lock.json). The job `shared` of pr.yml checks the copies
+# against the PINNED commit, so it never fails because this repository moved. This workflow closes the other gap: nobody
+# is told that a service still runs an old copy.
+#
+# For each service it reads shared.lock.json on the default branch. A service is behind when the latest commit that changed
+# shared/ is not in its pin. A service with no pin file is reported too.
+# It keeps ONE open issue: it opens the issue for a new row, and comments on the open issue for a later row. It never changes
+# a file or a pin. A person runs the sync script (the issue names the command) and opens one pull request for each service.
+#
+# The issue is in this repository, like the issues of the dependency audit and the tool pins.
+# The README section "Shared files" explains the mechanism.
+on:
+  schedule:
+    # Monday, 05:23 UTC.
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      repositories:
+        description: Repository names, separated by spaces. Leave it empty to check the four services.
+        type: string
+        required: false
+        default: ''
+      dry-run:
+        description: Write nothing. Print the issue or the comment that the run would write.
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+# Two runs at the same time could each open an issue. A running check is never cancelled.
+concurrency:
+  group: shared-files
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: compare the pins with the latest change of shared/ and keep the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORIES: ${{ inputs.repositories }}
+          DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node actions/shared-files/cli.mjs report
