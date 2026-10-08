@@ -1,8 +1,18 @@
 name: pr
 
-# The checks of a pull request in a service repository. It has no AWS access.
+# The checks of a pull request in a service repository.
+# The jobs have no AWS access, except the job diff. It calls diff.yml, which reads the deployed stack of
+# Production with a role that can only read. The README section "The cdk diff comment" explains the security model.
+# The caller must give these permissions: contents: read, id-token: write, pull-requests: write.
+# The caller must pass its secrets with "secrets: inherit".
 on:
   workflow_call:
+    inputs:
+      tools-ref:
+        description: The ref of lab-workflows that the scripts of the diff come from. Leave the default. A test of a branch sets it.
+        type: string
+        required: false
+        default: main
 
 permissions:
   contents: read
@@ -84,3 +94,17 @@ jobs:
           tool: actionlint
       - if: steps.changes.outputs.changed == 'true'
         run: actionlint
+
+  # Shows what a release would change in Production, as one comment that each push updates (lab-platform#13).
+  # A delete or a replacement of a stateful resource fails this job until the pull request has the label
+  # destructive-change-approved. A fork pull request has no OIDC token, so the job skips the diff with a notice.
+  # The ref @main of diff.yml is needed: the role github-pr-diff trusts only diff.yml on main.
+  diff:
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: jross24/lab-workflows/.github/workflows/diff.yml@main
+    with:
+      tools-ref: ${{ inputs.tools-ref }}
+    secrets: inherit
