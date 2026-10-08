@@ -133,6 +133,8 @@ export function runReport({ dir, env, gh, log = console.log }) {
     label: APPROVAL_LABEL,
     accountIds,
     missingStacks: meta.stacks.filter((stack) => !stack.deployed).map((stack) => stack.name),
+    // The fetch job writes the status of each deployed stack. A meta file of an older fetch job has none.
+    stackStatuses: meta.stacks.map((stack) => ({ name: stack.name, status: stack.status })),
   });
 
   const posted = upsertComment({ gh, repo, pr, marker: markerFor(env.KEY), body });

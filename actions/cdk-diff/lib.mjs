@@ -190,6 +190,33 @@ function summaryLine(summary) {
   return `${summary.add} to add, ${summary.change} to change, ${summary.replace} to replace, ${summary.delete} to delete`;
 }
 
+// The template can differ with no resource added, changed, replaced or deleted: the description, a parameter
+// or an output has no resource line. The four counts are then zero, so the line says what the counts cannot.
+const OTHER_DIFFERENCE = 'but something else differs (for example a parameter, an output or the description)';
+
+// CloudFormation names a status like UPDATE_IN_PROGRESS. The meta file comes from a job that ran the code of the
+// pull request, so the comment shows a value only if it has this shape. Any other value is dropped.
+const STATUS_FORMAT = /^[A-Z][A-Z_]*$/;
+
+// A status that ends in _COMPLETE is stable. Every other status (IN_PROGRESS, FAILED) means that the deployed template
+// can be the one of a release that is still on its way.
+export function unstableStacks(stackStatuses) {
+  return (Array.isArray(stackStatuses) ? stackStatuses : []).filter(
+    (item) =>
+      typeof item?.name === 'string' &&
+      typeof item.status === 'string' &&
+      STATUS_FORMAT.test(item.status) &&
+      !item.status.endsWith('_COMPLETE'),
+  );
+}
+
+function statusSection(stackStatuses) {
+  const unstable = unstableStacks(stackStatuses);
+  if (unstable.length === 0) return '';
+  const lines = unstable.flatMap((item) => [`> **The stack \`${item.name}\` has the status \`${item.status}\`.**`, '>']);
+  return ['> [!WARNING]', ...lines, '> The comparison may be against a release that still runs.'].join('\n');
+}
+
 function guardSection({ stateful, verdict, label }) {
   if (stateful.length === 0) return '';
   const rows = stateful.map((item) => `> | \`${item.logicalId}\` | \`${item.type}\` | ${item.action} |`);
@@ -226,16 +253,20 @@ export function renderComment({
   label,
   accountIds,
   missingStacks = [],
+  stackStatuses = [],
 }) {
   // A diff of outputs or parameters only has no resource line, but it is still a change.
   const hasChangeLines = /^\[[+~-]\] /m.test(diff);
-  const none = summary.add + summary.change + summary.replace + summary.delete === 0 && !hasChangeLines && stateful.length === 0;
+  const noCounts = summary.add + summary.change + summary.replace + summary.delete === 0;
+  const none = noCounts && !hasChangeLines && stateful.length === 0;
+  // The guard counts a stateful resource that the templates show and the text does not. That case is a resource change.
+  const onlyOther = noCounts && !none && stateful.length === 0;
   const parts = [markerFor(key), `### ${title}`, ''];
 
   parts.push(
     none
       ? '**No change.** The templates of this pull request equal the deployed templates.'
-      : `**${summaryLine(summary)}.**`,
+      : `**${summaryLine(summary)}${onlyOther ? `, ${OTHER_DIFFERENCE}` : ''}.**`,
   );
   parts.push('');
   const names = stackNames.map((name) => `\`${name}\``).join(', ');
@@ -251,6 +282,9 @@ export function renderComment({
       `${missingStacks.map((name) => `\`${name}\``).join(', ')} is not deployed yet in this account. The diff shows every resource as new.`,
     );
   }
+
+  const status = statusSection(stackStatuses);
+  if (status) parts.push('', status);
 
   const guard = guardSection({ stateful, verdict, label });
   if (guard) parts.push('', guard);

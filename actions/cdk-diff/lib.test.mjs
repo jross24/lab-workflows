@@ -462,4 +462,123 @@ describe('renderComment', () => {
     const body = renderComment({ ...base, version: undefined, missingStacks: ['lab-svc-catalogue'] });
     assert.match(body, /not deployed yet/);
   });
+
+  // Item 2 of lab-platform#44. A change of the description, a parameter or an output has no resource line,
+  // so all four counts are zero. The summary line must not read as "nothing changes".
+  describe('when only something other than a resource differs', () => {
+    const zero = { add: 0, change: 0, replace: 0, delete: 0 };
+    const summaryOf = (body) => body.split('\n').find((line) => line.startsWith('**'));
+
+    for (const [what, file] of [
+      ['the description', 'description-only'],
+      ['an output', 'output-only'],
+      ['a parameter', 'parameter-only'],
+    ]) {
+      it(`says that something else differs when ${what} is the only change (real CLI output)`, () => {
+        const diff = cleanDiffOutput(diffText(file));
+        const result = assess({ diff });
+        assert.deepEqual(result.summary, zero);
+        const body = renderComment({ ...base, summary: result.summary, diff });
+        assert.match(summaryOf(body), /0 to add, 0 to change, 0 to replace, 0 to delete/);
+        assert.match(summaryOf(body), /something else differs/);
+        assert.match(summaryOf(body), /parameter, an output or the description/);
+        assert.doesNotMatch(body, /No change/);
+        assert.match(body, /<details>/);
+      });
+    }
+
+    it('does not say it when the counts are not zero', () => {
+      const body = renderComment(base);
+      assert.doesNotMatch(summaryOf(body), /something else/);
+    });
+
+    it('does not say it when there is no difference at all', () => {
+      const body = renderComment({ ...base, summary: zero, diff: 'Stack A (a)\nThere were no differences' });
+      assert.match(body, /No change/);
+      assert.doesNotMatch(body, /something else/);
+    });
+
+    it('does not say it when the guard found a stateful resource that the text did not show', () => {
+      const body = renderComment({
+        ...base,
+        summary: zero,
+        diff: 'Stack A (a)\nOutputs\n[~] Output A/V V: {"Value":"1"} to {"Value":"2"}',
+        stateful: [{ type: 'AWS::DynamoDB::Table', logicalId: 'Orders', action: 'destroy' }],
+        verdict: { blocked: true, approved: false },
+      });
+      assert.doesNotMatch(summaryOf(body), /something else/);
+    });
+  });
+
+  // Item 3 of lab-platform#44. While a deployment runs, CloudFormation holds the template of a release that
+  // is still on its way. The comment shows the status of the stack when it is not a stable *_COMPLETE status.
+  describe('the status of the deployed stack', () => {
+    const withStatus = (status, extra = {}) =>
+      renderComment({ ...base, stackStatuses: [{ name: 'lab-svc-catalogue', status }], ...extra });
+
+    it('shows UPDATE_IN_PROGRESS with one sentence that the comparison may be against a release that still runs', () => {
+      const body = withStatus('UPDATE_IN_PROGRESS');
+      assert.match(body, /`lab-svc-catalogue`/);
+      assert.match(body, /`UPDATE_IN_PROGRESS`/);
+      assert.match(body, /may be against a release that still runs/);
+    });
+
+    it('shows a failed or a rollback status that is still moving', () => {
+      for (const status of ['UPDATE_ROLLBACK_IN_PROGRESS', 'UPDATE_ROLLBACK_FAILED', 'UPDATE_COMPLETE_CLEANUP_IN_PROGRESS']) {
+        assert.match(withStatus(status), new RegExp(`\`${status}\``), status);
+      }
+    });
+
+    it('shows nothing for a stable *_COMPLETE status', () => {
+      for (const status of ['CREATE_COMPLETE', 'UPDATE_COMPLETE', 'UPDATE_ROLLBACK_COMPLETE', 'IMPORT_COMPLETE']) {
+        const body = withStatus(status);
+        assert.doesNotMatch(body, /may be against/, status);
+        assert.doesNotMatch(body, new RegExp(status), status);
+      }
+    });
+
+    it('shows nothing when the status is unknown', () => {
+      for (const stackStatuses of [undefined, [], [{ name: 'lab-svc-catalogue', status: null }], [{ name: 'lab-svc-catalogue' }]]) {
+        const body = renderComment({ ...base, stackStatuses });
+        assert.doesNotMatch(body, /may be against/);
+      }
+    });
+
+    it('treats the status as data and shows nothing for a value that is not a status', () => {
+      const body = withStatus('UPDATE_COMPLETE`\n<script>alert(1)</script>');
+      assert.doesNotMatch(body, /script/);
+      assert.doesNotMatch(body, /may be against/);
+    });
+
+    it('names each stack that is not stable, and says the sentence once', () => {
+      const body = renderComment({
+        ...base,
+        stackNames: ['lab-a', 'lab-b', 'lab-c'],
+        stackStatuses: [
+          { name: 'lab-a', status: 'UPDATE_IN_PROGRESS' },
+          { name: 'lab-b', status: 'UPDATE_COMPLETE' },
+          { name: 'lab-c', status: 'CREATE_IN_PROGRESS' },
+        ],
+      });
+      assert.match(body, /`lab-a`[^\n]*`UPDATE_IN_PROGRESS`/);
+      assert.match(body, /`lab-c`[^\n]*`CREATE_IN_PROGRESS`/);
+      assert.doesNotMatch(body, /UPDATE_COMPLETE/);
+      assert.equal(body.match(/may be against a release that still runs/g).length, 1);
+    });
+
+    it('also shows it when the comment says no change', () => {
+      const body = withStatus('UPDATE_IN_PROGRESS', { summary: { add: 0, change: 0, replace: 0, delete: 0 }, diff: '' });
+      assert.match(body, /No change/);
+      assert.match(body, /`UPDATE_IN_PROGRESS`/);
+    });
+
+    it('keeps the account ID out of the comment', () => {
+      const body = renderComment({
+        ...base,
+        stackNames: [`lab-${ACCOUNT}`],
+        stackStatuses: [{ name: `lab-${ACCOUNT}`, status: 'UPDATE_IN_PROGRESS' }],
+      });
+      assert.doesNotMatch(body, /\d{12}/);
+    });
+  });
 });
