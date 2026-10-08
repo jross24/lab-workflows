@@ -6,7 +6,11 @@ name: redeploy
 #
 # A redeploy to Test takes the Test lock, like a release. A redeploy to Staging or Production waits for the job
 # that deploys to that environment in the same repository: both use the concurrency group deploy-<environment>.
-# The checks before the deployment run in the mode redeploy: they stop a redeploy only when a provider is missing or too old.
+# The checks before the deployment run in the mode redeploy. They stop a redeploy in two cases:
+#   - a provider is missing or too old;
+#   - the version is below the rollback floor of the environment (the SSM parameter /lab/<service>/min-rollback-version).
+#     A rollback restores code, not data. The floor is the oldest version that can still read the data. The message is
+#     "Rollback refused". The check runs after the Test lock and before the deployment, so a refused redeploy changes nothing.
 # A redeploy may go back to an older version, and it does not stop for the tested set. The README explains why.
 on:
   workflow_call:

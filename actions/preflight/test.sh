@@ -133,6 +133,25 @@ check_equal 'neighbour: older with no range' 'older' "$(neighbour_verdict 0.5.2 
 check_equal 'neighbour: older but inside the range' 'accepted' "$(neighbour_verdict 0.5.2 0.5.1 '>=0.5.0')"
 check_equal 'neighbour: older and outside the range' 'older' "$(neighbour_verdict 0.5.2 0.4.0 '>=0.5.0')"
 
+echo '--- the rollback floor'
+
+check_equal 'floor: no floor recorded' 'none' "$(floor_verdict 0.7.0 '')"
+check_equal 'floor: the version equals the floor' 'ok' "$(floor_verdict 0.8.0 0.8.0)"
+check_equal 'floor: the version is above the floor' 'ok' "$(floor_verdict 0.8.1 0.8.0)"
+check_equal 'floor: the version is above the floor by a minor' 'ok' "$(floor_verdict 0.9.0 0.8.5)"
+check_equal 'floor: the version is below the floor' 'below' "$(floor_verdict 0.7.9 0.8.0)"
+check_equal 'floor: the major counts first' 'below' "$(floor_verdict 0.99.99 1.0.0)"
+check_equal 'floor: 0.9.0 is below 0.10.0, as numbers and not as text' 'below' "$(floor_verdict 0.9.0 0.10.0)"
+check_equal 'floor: 0.10.0 is above 0.9.0' 'ok' "$(floor_verdict 0.10.0 0.9.0)"
+check_equal 'floor: a leading zero is decimal' 'ok' "$(floor_verdict 0.8.0 0.08.0)"
+
+# The words of the refusal are part of the contract with the person who reads it. They must stay the same.
+expected_refusal='Rollback refused: core 0.7.0 cannot run against the data in production. A migration changed the data in a way that an older version cannot read. The oldest version that can run is core 0.8.0 (SSM parameter /lab/core/min-rollback-version). Do not roll back to 0.7.0. Go back to 0.8.0 or newer, or fix forward with a new release. If the data itself is wrong, restore it first: see "Restore" in the README of lab-svc-core.'
+check_equal 'the refusal has the exact words' "$expected_refusal" "$(rollback_refusal core 0.7.0 production 0.8.0)"
+check_equal 'the refusal uses the repository of the service' \
+  'Rollback refused: web 0.3.0 cannot run against the data in staging. A migration changed the data in a way that an older version cannot read. The oldest version that can run is web 0.4.0 (SSM parameter /lab/web/min-rollback-version). Do not roll back to 0.3.0. Go back to 0.4.0 or newer, or fix forward with a new release. If the data itself is wrong, restore it first: see "Restore" in the README of lab-web.' \
+  "$(rollback_refusal web 0.3.0 staging 0.4.0)"
+
 check_equal 'repository of core' 'lab-svc-core' "$(repository_of core)"
 check_equal 'repository of catalogue' 'lab-svc-catalogue' "$(repository_of catalogue)"
 check_equal 'repository of web' 'lab-web' "$(repository_of web)"
@@ -209,6 +228,44 @@ output="$PROBLEMS"
 check_equal 'a missing file is a problem' '1' "$status"
 contains 'the message for a missing file explains the file' 'A service repository needs this file' "$output"
 
+echo '--- pipeline.json: minRollbackVersion'
+
+validate '{"service":"core","minRollbackVersion":"0.8.0"}'
+check_equal 'a file with a rollback floor is valid' '0' "$status"
+check_equal 'the rollback floor is read' '0.8.0' "$PIPELINE_MIN_ROLLBACK"
+validate '{"service":"core"}'
+check_equal 'the rollback floor may be missing' '0' "$status"
+check_equal 'a missing rollback floor is empty' '' "$PIPELINE_MIN_ROLLBACK"
+validate '{"service":"core","requires":{},"minRollbackVersion":"10.20.30"}'
+check_equal 'a floor is read next to the other keys' '10.20.30' "$PIPELINE_MIN_ROLLBACK"
+validate '{"service":"core","minRollbackVersion":8}'
+check_equal 'a floor that is a number is a problem' '1' "$status"
+contains 'the message says that the floor must be text' '"minRollbackVersion" in' "$output"
+contains 'the message for a number names the type' 'but it is a number' "$output"
+contains 'the message names the file' "$work/pipeline.json" "$output"
+validate '{"service":"core","minRollbackVersion":null}'
+check_equal 'a floor that is null is a problem' '1' "$status"
+validate '{"service":"core","minRollbackVersion":["0.8.0"]}'
+check_equal 'a floor that is a list is a problem' '1' "$status"
+validate '{"service":"core","minRollbackVersion":"latest"}'
+check_equal 'a floor that is not a version is a problem' '1' "$status"
+contains 'the message names the bad floor' '"minRollbackVersion" in' "$output"
+contains 'the message says that the text is not a version' '"latest", which is not a version of the form 1.2.3' "$output"
+check_equal 'a bad floor is not kept' '' "$PIPELINE_MIN_ROLLBACK"
+validate '{"service":"core","minRollbackVersion":"v0.8.0"}'
+check_equal 'a floor with a v in front is a problem' '1' "$status"
+validate '{"service":"core","minRollbackVersion":"0.8"}'
+check_equal 'a floor with two numbers is a problem' '1' "$status"
+validate '{"service":"core","minRollbackVersion":"0.8.0-rc1"}'
+check_equal 'a floor with a prerelease is a problem' '1' "$status"
+validate '{"service":"core","minRollbackVersion":""}'
+check_equal 'an empty floor is a problem' '1' "$status"
+validate '{"service":"core","minRollbackVersion":"latest","require":{}}'
+check_equal 'a bad floor and a typo are two problems' '2' "$(grep -c . <<< "$PROBLEMS")"
+validate '{"service":"core","minRolbackVersion":"0.8.0"}'
+check_equal 'a typo in the key of the floor is a problem' '1' "$status"
+contains 'the unknown key message lists the floor key' 'The keys are service, requires, compatible and minRollbackVersion.' "$output"
+
 write_pipeline '{"service":"account","requires":{"core":">=0.5.0"}}'
 check_equal 'the service name is printed by validate' 'account' "$(bash "$here/preflight.sh" validate "$work/pipeline.json")"
 status=0
@@ -257,46 +314,84 @@ unset S V W C A K
 
 bin="$work/bin"
 mkdir -p "$bin"
-# A fake of the AWS CLI. FAKE_DEPLOYED lists "service version" lines. It answers ssm get-parameters like the real command.
+# A fake of the AWS CLI. It answers two calls like the real command:
+#   ssm get-parameters  reads the versions. FAKE_DEPLOYED lists "service version" lines.
+#   ssm get-parameter   reads the rollback floor. FAKE_FLOORS lists "service floor" lines.
+#                       A service with no line gives the error ParameterNotFound, like the real command.
+# FAKE_ERROR (versions) and FAKE_FLOOR_ERROR (floors) hold the text of an AWS error. A non-empty file makes the call fail.
 cat > "$bin/aws" << 'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$1" == ssm && "$2" == get-parameters ]] || { echo "fake aws: unexpected call $*" >&2; exit 99; }
-echo "$*" >> "$FAKE_CALLS"
-if [[ -s "$FAKE_ERROR" ]]; then
-  cat "$FAKE_ERROR" >&2
-  exit 254
-fi
-shift 2
-names=()
-while (($#)); do
-  case "$1" in
-    --names)
-      shift
-      while (($#)) && [[ "$1" != --* ]]; do
-        names+=("$1")
-        shift
-      done
-      ;;
-    *) shift ;;
-  esac
-done
-for name in "${names[@]}"; do
-  service="${name#/lab/}"
-  service="${service%/version}"
-  version="$(awk -v s="$service" '$1 == s { print $2 }' "$FAKE_DEPLOYED")"
-  if [[ -n "$version" ]]; then printf '%s\t%s\n' "$name" "$version"; fi
-done
+[[ "$1" == ssm ]] || { echo "fake aws: unexpected call $*" >&2; exit 99; }
+case "$2" in
+  get-parameters)
+    echo "$*" >> "$FAKE_CALLS"
+    if [[ -s "$FAKE_ERROR" ]]; then
+      cat "$FAKE_ERROR" >&2
+      exit 254
+    fi
+    shift 2
+    names=()
+    while (($#)); do
+      case "$1" in
+        --names)
+          shift
+          while (($#)) && [[ "$1" != --* ]]; do
+            names+=("$1")
+            shift
+          done
+          ;;
+        *) shift ;;
+      esac
+    done
+    for name in "${names[@]}"; do
+      service="${name#/lab/}"
+      service="${service%/version}"
+      version="$(awk -v s="$service" '$1 == s { print $2 }' "$FAKE_DEPLOYED")"
+      if [[ -n "$version" ]]; then printf '%s\t%s\n' "$name" "$version"; fi
+    done
+    ;;
+  get-parameter)
+    echo "$*" >> "$FAKE_CALLS"
+    if [[ -s "$FAKE_FLOOR_ERROR" ]]; then
+      cat "$FAKE_FLOOR_ERROR" >&2
+      exit 254
+    fi
+    name=''
+    shift 2
+    while (($#)); do
+      case "$1" in
+        --name) name="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    service="${name#/lab/}"
+    service="${service%/min-rollback-version}"
+    floor="$(awk -v s="$service" '$1 == s { print $2 }' "$FAKE_FLOORS")"
+    if [[ -z "$floor" ]]; then
+      echo 'An error occurred (ParameterNotFound) when calling the GetParameter operation: ' >&2
+      exit 254
+    fi
+    echo "$floor"
+    ;;
+  *)
+    echo "fake aws: unexpected call $*" >&2
+    exit 99
+    ;;
+esac
 FAKE
 chmod +x "$bin/aws"
 export PATH="$bin:$PATH"
 export FAKE_DEPLOYED="$work/deployed" FAKE_CALLS="$work/calls" FAKE_ERROR="$work/error"
+export FAKE_FLOORS="$work/floors" FAKE_FLOOR_ERROR="$work/floor-error"
 export GITHUB_OUTPUT="$work/github-output" GITHUB_STEP_SUMMARY="$work/summary"
 
 # setup <deployed lines...>
 setup() {
   : > "$FAKE_CALLS"
   : > "$FAKE_ERROR"
+  : > "$FAKE_FLOORS"
+  : > "$FAKE_FLOOR_ERROR"
   : > "$GITHUB_OUTPUT"
   : > "$GITHUB_STEP_SUMMARY"
   printf '%s\n' "$@" > "$FAKE_DEPLOYED"
@@ -325,7 +420,7 @@ run_check
 check_equal 'a release with its providers in place passes' '0' "$status"
 contains 'the summary says passed' 'Checks before the deployment to production: passed' "$(cat "$GITHUB_STEP_SUMMARY")"
 contains 'the summary has a row for the provider' '| provider | catalogue | >=0.3.0 | 0.3.1 | ok |' "$(cat "$GITHUB_STEP_SUMMARY")"
-check_equal 'the output has the previous version of the service and the result' 'previous-version=0.3.1 result=pass' "$(tr '\n' ' ' < "$GITHUB_OUTPUT" | sed 's/ $//')"
+check_equal 'the output has the previous version of the service, the floor and the result' 'previous-version=0.3.1 min-rollback-version= result=pass' "$(tr '\n' ' ' < "$GITHUB_OUTPUT" | sed 's/ $//')"
 check_equal 'one SSM call reads all the versions' '1' "$(wc -l < "$FAKE_CALLS" | tr -d ' ')"
 contains 'the call asks for the version parameters' '/lab/account/version /lab/catalogue/version /lab/web/version' "$(cat "$FAKE_CALLS")"
 
@@ -486,6 +581,205 @@ check_equal 'a record without the own service is refused' '1' "$status"
 
 PF_VERSION='' PF_TESTED_WITH='{"release":"v0.4.0","versions":{"catalogue":"0.3.1","core":"0.5.1"}}' run_check
 check_equal 'a dry run needs no own version in the record' '0' "$status"
+
+echo '--- check: the rollback floor in a redeploy'
+
+# set_floor <service floor lines...>   The rollback floors that the fake SSM holds.
+set_floor() {
+  printf '%s\n' "$@" > "$FAKE_FLOORS"
+}
+# floor_calls   The number of reads of a floor parameter. A read of the versions does not count.
+floor_calls() {
+  grep -c 'get-parameter --name ' "$FAKE_CALLS" || true
+}
+
+write_pipeline '{"service":"core"}'
+
+setup 'core 0.9.0'
+PF_MODE=redeploy PF_VERSION=0.7.0 run_check
+check_equal 'a redeploy with no floor recorded passes' '0' "$status"
+contains 'the summary says that no floor is recorded' '| rollback floor | core | 0.7.0 | none | ok: no floor recorded |' "$(cat "$GITHUB_STEP_SUMMARY")"
+check_equal 'the floor is read with one call' '1' "$(floor_calls)"
+contains 'the call asks for the parameter of the floor' 'get-parameter --name /lab/core/min-rollback-version' "$(cat "$FAKE_CALLS")"
+check_equal 'the output has an empty floor' 'min-rollback-version=' "$(grep min-rollback "$GITHUB_OUTPUT")"
+lacks 'a missing parameter is not an error' '::error' "$output"
+
+setup 'core 0.9.0'
+set_floor 'core 0.8.0'
+PF_MODE=redeploy PF_VERSION=0.8.0 run_check
+check_equal 'a redeploy to the floor itself passes' '0' "$status"
+contains 'the summary says that the version is not below the floor' '| rollback floor | core | 0.8.0 | 0.8.0 | ok: not below the floor |' "$(cat "$GITHUB_STEP_SUMMARY")"
+check_equal 'the output has the floor' 'min-rollback-version=0.8.0' "$(grep min-rollback "$GITHUB_OUTPUT")"
+
+setup 'core 0.9.0'
+set_floor 'core 0.7.0'
+PF_MODE=redeploy PF_VERSION=0.8.0 run_check
+check_equal 'a redeploy above the floor passes' '0' "$status"
+check_equal 'a redeploy above the floor says pass' 'result=pass' "$(grep result "$GITHUB_OUTPUT")"
+
+setup 'core 0.9.0'
+set_floor 'core 0.8.0'
+PF_MODE=redeploy PF_VERSION=0.10.0 run_check
+check_equal 'a redeploy of 0.10.0 above the floor 0.8.0 passes' '0' "$status"
+
+setup 'core 0.9.0'
+set_floor 'core 0.10.0'
+PF_MODE=redeploy PF_VERSION=0.9.0 run_check
+check_equal '0.9.0 is below the floor 0.10.0, as numbers' '1' "$status"
+
+setup 'core 0.9.0'
+set_floor 'core 0.8.0'
+PF_MODE=redeploy PF_VERSION=0.7.0 run_check
+check_equal 'a redeploy below the floor is refused' '1' "$status"
+contains 'the log has the refusal with the exact words' "::error title=Rollback refused::${expected_refusal}" "$output"
+check_equal 'the refusal is one error' '1' "$(grep -c '::error title=Rollback refused' <<< "$output" || true)"
+contains 'the summary row says failed' '| rollback floor | core | 0.7.0 | 0.8.0 | FAILED: below the floor |' "$(cat "$GITHUB_STEP_SUMMARY")"
+contains 'the summary says that the check stopped' 'stopped, 1 check(s) failed' "$(cat "$GITHUB_STEP_SUMMARY")"
+check_equal 'the result output says fail' 'result=fail' "$(grep result "$GITHUB_OUTPUT")"
+check_equal 'the output has the floor also after a refusal' 'min-rollback-version=0.8.0' "$(grep min-rollback "$GITHUB_OUTPUT")"
+contains 'the refusal names the service' 'core 0.7.0 cannot run' "$output"
+contains 'the refusal names the environment' 'against the data in production' "$output"
+contains 'the refusal names the floor' 'The oldest version that can run is core 0.8.0' "$output"
+contains 'the refusal names the parameter' '(SSM parameter /lab/core/min-rollback-version)' "$output"
+contains 'the refusal names the section Restore of the repository README' 'see "Restore" in the README of lab-svc-core.' "$output"
+contains 'the refusal says what to do' 'Go back to 0.8.0 or newer, or fix forward with a new release.' "$output"
+
+PF_ENVIRONMENT=staging PF_MODE=redeploy PF_VERSION=0.7.0 run_check
+check_equal 'a redeploy below the floor is refused in Staging too' '1' "$status"
+contains 'the refusal names the environment of the job' 'against the data in staging' "$output"
+
+# A provider that fails and a floor that fails are two errors. The check does not stop at the first one.
+write_pipeline '{"service":"core","requires":{"store":">=1.0.0"}}'
+setup 'core 0.9.0' 'store 0.5.0'
+set_floor 'core 0.8.0'
+PF_MODE=redeploy PF_VERSION=0.7.0 run_check
+check_equal 'a failed provider and a failed floor are two errors' '2' "$(grep -c '::error title=' <<< "$output" || true)"
+write_pipeline '{"service":"core"}'
+
+setup 'core 0.9.0'
+set_floor 'webb 0.8.0'
+PF_MODE=redeploy PF_VERSION=0.7.0 run_check
+check_equal 'the floor of another service does not count' '0' "$status"
+
+setup 'core 0.9.0'
+set_floor 'core soon'
+PF_MODE=redeploy PF_VERSION=0.7.0 run_check
+check_equal 'a floor that is not a version stops the check' '1' "$status"
+contains 'the message names the parameter and the value' 'The SSM parameter /lab/core/min-rollback-version in production holds "soon"' "$output"
+contains 'the message says that it is not a result of the check' 'This is not a result of the check.' "$output"
+check_equal 'a floor that is not a version writes no summary table' '' "$(cat "$GITHUB_STEP_SUMMARY")"
+lacks 'a floor that is not a version is not a refusal' 'Rollback refused' "$output"
+
+setup 'core 0.9.0'
+set_floor 'core v0.8.0'
+PF_MODE=redeploy PF_VERSION=0.9.0 run_check
+check_equal 'a floor with a v in front stops the check' '1' "$status"
+
+setup 'core 0.9.0'
+echo 'An error occurred (AccessDeniedException) when calling the GetParameter operation: not authorized' > "$FAKE_FLOOR_ERROR"
+PF_MODE=redeploy PF_VERSION=0.8.0 run_check
+check_equal 'an AWS error on the floor is an error and not a result of the check' '1' "$status"
+contains 'the message says that the floor could not be read' 'The rollback floor in production could not be read from SSM. This is not a result of the check.' "$output"
+contains 'the message names the permission' 'ssm:GetParameter on /lab/*' "$output"
+contains 'the log has the text of the AWS error' 'AccessDeniedException' "$output"
+check_equal 'an AWS error on the floor writes no summary table' '' "$(cat "$GITHUB_STEP_SUMMARY")"
+lacks 'an AWS error on the floor is not a refusal' 'Rollback refused' "$output"
+
+setup 'core 0.9.0'
+set_floor 'core 0.8.0'
+PF_MODE=redeploy PF_VERSION='' run_check
+check_equal 'a dry run is not compared with the floor' '0' "$status"
+check_equal 'a dry run does not read the floor' '0' "$(floor_calls)"
+lacks 'a dry run has no row for the floor' '| rollback floor |' "$(cat "$GITHUB_STEP_SUMMARY")"
+check_equal 'a dry run has an empty floor in the output' 'min-rollback-version=' "$(grep min-rollback "$GITHUB_OUTPUT")"
+
+setup 'core 0.6.0'
+set_floor 'core 0.8.0'
+PF_MODE=release PF_VERSION=0.7.0 run_check
+check_equal 'a release does not compare with the floor in SSM' '0' "$status"
+check_equal 'a release does not read the floor' '0' "$(floor_calls)"
+lacks 'a release has no row for the floor without a floor in pipeline.json' '| rollback floor |' "$(cat "$GITHUB_STEP_SUMMARY")"
+
+echo '--- check: the floor in pipeline.json'
+
+write_pipeline '{"service":"core","minRollbackVersion":"0.8.0"}'
+
+setup 'core 0.7.0'
+PF_MODE=release PF_VERSION=0.8.0 run_check
+check_equal 'a release at the declared floor passes' '0' "$status"
+contains 'the summary row says that the floor is not above the release' '| rollback floor | core | 0.8.0 | 0.8.0 (pipeline.json) | ok: the floor is not above the release |' "$(cat "$GITHUB_STEP_SUMMARY")"
+
+setup 'core 0.7.0'
+PF_MODE=release PF_VERSION=0.9.0 run_check
+check_equal 'a release above the declared floor passes' '0' "$status"
+
+setup 'core 0.7.0'
+PF_MODE=release PF_VERSION=0.7.5 run_check
+check_equal 'a release below its own declared floor fails' '1' "$status"
+contains 'the log has the error with its title' '::error title=Floor above release::' "$output"
+contains 'the message names the file, the floor, the service and the release' 'pipeline.json declares minRollbackVersion 0.8.0 for core, but this release is core 0.7.5, which is older.' "$output"
+contains 'the message says that a floor cannot be newer than its release' 'A floor cannot be newer than the release that declares it.' "$output"
+contains 'the message says what to do' 'Lower minRollbackVersion to 0.7.5 or less' "$output"
+contains 'the summary row says failed' '| rollback floor | core | 0.7.5 | 0.8.0 (pipeline.json) | FAILED: the floor is above the release |' "$(cat "$GITHUB_STEP_SUMMARY")"
+check_equal 'a release does not read the floor from SSM, also with a floor in pipeline.json' '0' "$(floor_calls)"
+
+setup 'core 0.9.0'
+PF_MODE=redeploy PF_VERSION=0.7.5 run_check
+check_equal 'a redeploy ignores the floor of pipeline.json: only SSM counts' '0' "$status"
+lacks 'a redeploy has no row about pipeline.json' 'pipeline.json)' "$(cat "$GITHUB_STEP_SUMMARY")"
+
+setup 'core 0.7.0'
+PF_MODE=release PF_VERSION='' run_check
+check_equal 'a dry run does not compare the floor of pipeline.json' '0' "$status"
+lacks 'a dry run has no row for the floor of pipeline.json' '| rollback floor |' "$(cat "$GITHUB_STEP_SUMMARY")"
+
+write_pipeline '{"service":"web","requires":{"catalogue":">=0.3.0","account":">=0.3.0"}}'
+
+echo '--- fetch_floor'
+
+fake_floor="$work/floor-bin"
+mkdir -p "$fake_floor"
+printf '#!/usr/bin/env bash
+echo 0.8.0
+' > "$fake_floor/aws"
+chmod +x "$fake_floor/aws"
+check_equal 'a floor is printed' '0.8.0' "$(PATH="$fake_floor:$PATH" fetch_floor core)"
+printf '#!/usr/bin/env bash
+echo "warning: a stray line on stderr" >&2
+echo 0.8.0
+' > "$fake_floor/aws"
+check_equal 'a stray line on stderr does not change the floor' '0.8.0' "$(PATH="$fake_floor:$PATH" fetch_floor core 2> /dev/null)"
+printf '#!/usr/bin/env bash
+printf "0.8.0\\r\\n"
+' > "$fake_floor/aws"
+check_equal 'a CR at the end of the line goes away' '0.8.0' "$(PATH="$fake_floor:$PATH" fetch_floor core)"
+printf '#!/usr/bin/env bash
+printf "0.8.0\\n::warning::injected\\n"
+' > "$fake_floor/aws"
+check_equal 'a line break in the value cannot start a workflow command' '0.8.0?::warning::injected' "$(PATH="$fake_floor:$PATH" fetch_floor core)"
+printf '#!/usr/bin/env bash
+echo "An error occurred (ParameterNotFound) when calling the GetParameter operation: " >&2
+exit 254
+' > "$fake_floor/aws"
+status=0
+output="$(PATH="$fake_floor:$PATH" fetch_floor core 2>&1)" || status=$?
+check_equal 'a parameter that does not exist gives code 0' '0' "$status"
+check_equal 'a parameter that does not exist gives no text' '' "$output"
+printf '#!/usr/bin/env bash
+echo "An error occurred (ThrottlingException) when calling the GetParameter operation: Rate exceeded" >&2
+exit 254
+' > "$fake_floor/aws"
+status=0
+output="$(PATH="$fake_floor:$PATH" fetch_floor core 2>&1)" || status=$?
+check_equal 'another AWS error gives code 1' '1' "$status"
+contains 'another AWS error shows its text' 'ThrottlingException' "$output"
+printf '#!/usr/bin/env bash
+echo "Unable to locate credentials. You can configure credentials by running aws configure." >&2
+exit 253
+' > "$fake_floor/aws"
+status=0
+output="$(PATH="$fake_floor:$PATH" fetch_floor core 2>&1)" || status=$?
+check_equal 'missing credentials give code 1' '1' "$status"
 
 echo '--- fetch_deployed'
 

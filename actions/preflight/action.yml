@@ -1,7 +1,7 @@
 name: preflight
-description: Checks the environment before a deployment. It compares the deployed versions with pipeline.json and with the tested set. It changes nothing.
+description: Checks the environment before a deployment. It compares the deployed versions with pipeline.json, with the tested set and with the rollback floor. It changes nothing.
 
-# The job must log in to AWS first. The role github-deploy needs ssm:GetParameters on /lab/*. The action only reads.
+# The job must log in to AWS first. The role github-deploy needs ssm:GetParameters and ssm:GetParameter on /lab/*. The action only reads.
 # The caller must check out the repository first, for pipeline.json. The README explains every check.
 inputs:
   environment:
@@ -13,7 +13,9 @@ inputs:
   mode:
     description: >-
       release stops when this release is older than the environment and when a tested neighbour is missing.
-      redeploy lets an older version go, and only warns about a tested neighbour. A rollback must not stop.
+      redeploy lets an older version go, and only warns about a tested neighbour. A rollback must not stop for these.
+      redeploy stops a version that is below the rollback floor of the environment (the SSM parameter /lab/<service>/min-rollback-version).
+      release stops when the key minRollbackVersion of pipeline.json is newer than the release.
     default: release
   file:
     description: The path of pipeline.json, relative to the workspace.
@@ -29,6 +31,9 @@ outputs:
   previous-version:
     description: The version of the service in the environment before the job. Empty if the service is not deployed there.
     value: ${{ steps.check.outputs.previous-version }}
+  min-rollback-version:
+    description: The rollback floor of the service in the environment before the job. Empty if no floor is recorded, and also empty for a release and for a dry run, because only a redeploy with a version reads the floor.
+    value: ${{ steps.check.outputs.min-rollback-version }}
   result:
     description: pass or fail.
     value: ${{ steps.check.outputs.result }}
