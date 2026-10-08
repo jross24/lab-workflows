@@ -155,6 +155,7 @@ check_equal 'the refusal uses the repository of the service' \
 check_equal 'repository of core' 'lab-svc-core' "$(repository_of core)"
 check_equal 'repository of catalogue' 'lab-svc-catalogue' "$(repository_of catalogue)"
 check_equal 'repository of web' 'lab-web' "$(repository_of web)"
+check_equal 'repository of flags is lab-flags, not lab-svc-flags' 'lab-flags' "$(repository_of flags)"
 
 check_equal 'lookup finds a value' '0.5.1' "$(lookup core $'core\t0.5.1\nweb\t0.3.1')"
 check_equal 'lookup finds the second line' '0.3.1' "$(lookup web $'core\t0.5.1\nweb\t0.3.1')"
@@ -195,6 +196,15 @@ validate '{"service":"web","requires":{"catalogue":">=0.3.0","account":">=0.3.0"
 check_equal 'a file with compatible is valid' '0' "$status"
 check_equal 'the compatible ranges are read' $'core\t>=0.5.0 <1.0.0' "$(tr -d '\n' <<< "$PIPELINE_COMPATIBLE")"
 check_equal 'two providers are two lines' '2' "$(grep -c . <<< "$PIPELINE_REQUIRES")"
+# The service flags (issue 32) has no providers, and a service may list flags as a provider.
+validate '{"service":"flags","requires":{}}'
+check_equal 'the file of flags with an empty requires is valid' '0' "$status"
+check_equal 'the name flags is read' 'flags' "$PIPELINE_SERVICE"
+check_equal 'flags has no requires lines' '' "$PIPELINE_REQUIRES"
+validate '{"service":"catalogue","requires":{"core":">=0.5.0","flags":">=0.1.0"}}'
+check_equal 'a service may list flags in requires' '0' "$status"
+check_equal 'the range of flags is read' '>=0.1.0' "$(lookup flags "$PIPELINE_REQUIRES")"
+check_equal 'the range of core is still read' '>=0.5.0' "$(lookup core "$PIPELINE_REQUIRES")"
 
 validate '{"requires":{}}'
 check_equal 'a missing service is a problem' '1' "$status"
@@ -307,6 +317,36 @@ S='Core' record
 check_equal 'a bad service name is an error' '1' "$status"
 V='latest' record
 check_equal 'a bad release version is an error' '1' "$status"
+
+# The four applications keep the record as it was: the same line, four versions and no more (issue 32).
+record
+check_equal 'the record of a web release is the same line as before' \
+  '{"release":"v0.4.0","service":"web","version":"0.4.0","commit":"abc123","e2eCommit":"def456","versions":{"web":"0.4.0","catalogue":"0.3.1","account":"0.3.1","core":"0.5.1"}}' "$output"
+for app in web catalogue account core; do
+  case "$app" in
+    web) app_version='0.4.0' ;;
+    core) app_version='0.5.1' ;;
+    *) app_version='0.3.1' ;;
+  esac
+  S="$app" V="$app_version" record
+  check_equal "a $app release is recorded" '0' "$status"
+  check_equal "the record of a $app release has the four versions and no more" 'account,catalogue,core,web' "$(jq -r '.versions | keys | join(",")' <<< "$output")"
+done
+
+# A release of a service outside the four (issue 32). The suite does not report its version, so the record also holds
+# the version of the release itself. The check then treats it like any other entry.
+S='flags' V='0.1.0' record
+check_equal 'a release of a service outside the four is recorded' '0' "$status"
+check_equal 'the record holds the five versions, the own version last' '0.4.0 0.3.1 0.3.1 0.5.1 0.1.0' \
+  "$(jq -r '[.versions.web, .versions.catalogue, .versions.account, .versions.core, .versions.flags] | join(" ")' <<< "$output")"
+check_equal 'the record names the service and the version of the release' 'flags 0.1.0' "$(jq -r '[.service, .version] | join(" ")' <<< "$output")"
+check_equal 'the record of a flags release is one line' '1' "$(wc -l <<< "$output" | tr -d ' ')"
+S='flags' V='0.1.0' K='' record
+check_equal 'a missing neighbour is still an error for a release outside the four' '1' "$status"
+contains 'the message for a missing neighbour is the same' 'The E2E run did not record a version of core (""). The tested set is not complete.' "$output"
+S='flags' V='latest' record
+check_equal 'a bad version of a release outside the four is an error' '1' "$status"
+contains 'the message for a bad release version is the same' 'The version of the release is missing or wrong ("latest").' "$output"
 
 unset S V W C A K
 
@@ -581,6 +621,58 @@ check_equal 'a record without the own service is refused' '1' "$status"
 
 PF_VERSION='' PF_TESTED_WITH='{"release":"v0.4.0","versions":{"catalogue":"0.3.1","core":"0.5.1"}}' run_check
 check_equal 'a dry run needs no own version in the record' '0' "$status"
+
+echo '--- check: a service outside the four (flags, issue 32)'
+
+# The service flags has no endpoint and no part in the E2E suite. Its record comes from tested_with_json, as in the job tested-set.
+S='flags' V='0.1.0' record
+flags_record="$output"
+write_pipeline '{"service":"flags","requires":{}}'
+setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.4.0' 'flags 0.0.9'
+PF_VERSION=0.1.0 PF_TESTED_WITH="$flags_record" run_check
+check_equal 'a flags release with its record passes' '0' "$status"
+contains 'the summary has the row of this release' '| this release | flags | 0.1.0 | 0.0.9 | ok: newer than the environment |' "$(cat "$GITHUB_STEP_SUMMARY")"
+contains 'the summary compares a neighbour of the set' '| tested together | core | 0.5.1 | 0.5.1 | ok: the same version |' "$(cat "$GITHUB_STEP_SUMMARY")"
+lacks 'the summary does not compare flags with itself' '| tested together | flags |' "$(cat "$GITHUB_STEP_SUMMARY")"
+check_equal 'the output has the previous version of flags and the result' 'previous-version=0.0.9 min-rollback-version= result=pass' "$(tr '\n' ' ' < "$GITHUB_OUTPUT" | sed 's/ $//')"
+
+setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.4.0'
+PF_VERSION=0.1.0 PF_TESTED_WITH="$flags_record" run_check
+check_equal 'the first flags release passes' '0' "$status"
+
+# A record from before this change has the four versions only. It still does not say that the suite tested this release.
+PF_VERSION=0.1.0 PF_TESTED_WITH="$(tested_json 0.4.0 0.3.1 0.3.1 0.5.1)" run_check
+check_equal 'a record with the four versions only is refused for flags' '1' "$status"
+contains 'the message says that the record has no version of flags' 'The record has no version of flags, so it does not say that the suite tested this release.' "$output"
+
+PF_VERSION=0.1.1 PF_TESTED_WITH="$flags_record" run_check
+check_equal 'a record of another flags release is refused' '1' "$status"
+contains 'the message names both versions of flags' 'The record belongs to flags 0.1.0, but this deployment is flags 0.1.1.' "$output"
+
+S='flags' V='0.1.0' K='0.5.2' record
+flags_older_record="$output"
+PF_VERSION=0.1.0 PF_TESTED_WITH="$flags_older_record" run_check
+check_equal 'an older neighbour stops a flags release' '1' "$status"
+contains 'the message for an older neighbour is the same' '::error title=Missing release::core 0.5.2 was in the set that the E2E suite tested with flags 0.1.0 (release v0.4.0 of flags), but production runs core 0.5.1.' "$output"
+contains 'the message tells where to release the neighbour' 'Release core 0.5.2 to production first (repository lab-svc-core)' "$output"
+
+# A service may list flags as a provider. The message names the repository lab-flags.
+write_pipeline '{"service":"catalogue","requires":{"core":">=0.5.0","flags":">=0.1.0"}}'
+setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.4.0'
+PF_VERSION=0.3.2 run_check
+check_equal 'a provider flags that is not deployed stops the release' '1' "$status"
+contains 'the call asks for the version of flags' '/lab/flags/version' "$(cat "$FAKE_CALLS")"
+contains 'the message says that flags is not deployed' 'catalogue needs flags >=0.1.0, but production has no version of flags (the SSM parameter /lab/flags/version does not exist). Deploy flags to production first (repository lab-flags).' "$output"
+setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.4.0' 'flags 0.0.9'
+PF_VERSION=0.3.2 run_check
+check_equal 'a provider flags that is too old stops the release' '1' "$status"
+contains 'the message names the repository lab-flags' 'Put a version of flags that is inside the range into production first (repository lab-flags)' "$output"
+setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.4.0' 'flags 0.1.0'
+PF_VERSION=0.3.2 run_check
+check_equal 'a provider flags inside the range passes' '0' "$status"
+contains 'the summary has the row of the provider flags' '| provider | flags | >=0.1.0 | 0.1.0 | ok |' "$(cat "$GITHUB_STEP_SUMMARY")"
+
+write_pipeline '{"service":"web","requires":{"catalogue":">=0.3.0","account":">=0.3.0"}}'
 
 echo '--- check: the rollback floor in a redeploy'
 

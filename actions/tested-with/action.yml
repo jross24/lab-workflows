@@ -1,5 +1,5 @@
 name: tested with
-description: Makes the record of the tested versions from the output of the E2E run. It fails if the record is not complete or if the suite did not test this release.
+description: Makes the record of the tested versions from the output of the E2E run. It fails if the record is not complete or if the suite did not test this release. For a service that is not one of the four applications, the record also holds the version of the release.
 
 inputs:
   tag:

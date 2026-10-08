@@ -109,13 +109,13 @@ satisfies() {
   return 0
 }
 
-# repository_of <service>   The repository that holds the service. The lab names it lab-svc-<name>, except for web.
+# repository_of <service>   The repository that holds the service. The lab names it lab-svc-<name>, except for web and flags.
 repository_of() {
-  if [[ "$1" == web ]]; then
-    echo 'lab-web'
-  else
-    echo "lab-svc-$1"
-  fi
+  case "$1" in
+    web) echo 'lab-web' ;;
+    flags) echo 'lab-flags' ;;
+    *) echo "lab-svc-$1" ;;
+  esac
 }
 
 # lookup <name> <map>   A map is text with one "name<TAB>value" pair on each line. Prints the value, or nothing.
@@ -319,8 +319,11 @@ validate_pipeline() {
 # tested_with_json
 # Builds the JSON from the variables. It fails if a version is missing, if a text is not a version,
 # or if the version of the service itself is not the version of the release.
+# The E2E suite reports the four applications only. A release of another service has no version in that report.
+# Then the record also holds the version of the release, under the name of the service. The check then finds it
+# like any other entry. For the four applications the record has the four versions and no more.
 tested_with_json() {
-  local service="${PF_SERVICE:-}" version="${PF_VERSION:-}" tag="${PF_TAG:-}" name value problems=0 own=''
+  local service="${PF_SERVICE:-}" version="${PF_VERSION:-}" tag="${PF_TAG:-}" name value problems=0 own='' outside=''
   if [[ ! "$service" =~ $NAME_PATTERN ]]; then
     echo "::error::The name of the service is missing or wrong (\"$service\")." >&2
     return 1
@@ -348,13 +351,16 @@ tested_with_json() {
     echo "::error::The E2E run tested $service $own, but this release is $version. The suite did not test this release." >&2
     return 1
   fi
+  [[ " $APPLICATIONS " == *" $service "* ]] || outside="$version"
 
   jq -n -c \
     --arg tag "$tag" --arg service "$service" --arg version "$version" \
     --arg commit "${PF_COMMIT:-}" --arg e2eCommit "${PF_E2E_COMMIT:-}" \
     --arg web "${PF_WEB}" --arg catalogue "${PF_CATALOGUE}" --arg account "${PF_ACCOUNT}" --arg core "${PF_CORE}" \
+    --arg outside "$outside" \
     '{release: $tag, service: $service, version: $version, commit: $commit, e2eCommit: $e2eCommit,
-      versions: {web: $web, catalogue: $catalogue, account: $account, core: $core}}'
+      versions: ({web: $web, catalogue: $catalogue, account: $account, core: $core}
+        + (if $outside == "" then {} else {($service): $outside} end))}'
 }
 
 # The program of jq for the tested set: R is the release, V is a service and its version, X means a wrong shape.
