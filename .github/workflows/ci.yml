@@ -47,8 +47,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-      - name: test the cdk diff, preview, contract and accepted-advisories scripts
-        run: node --test actions/cdk-diff/lib.test.mjs actions/cdk-diff/cli.test.mjs actions/preview/lib.test.mjs actions/preview/cli.test.mjs actions/contract/lib.test.mjs actions/contract/cli.test.mjs actions/accepted-advisories/lib.test.mjs actions/accepted-advisories/cli.test.mjs
+      - name: test the cdk diff, preview, contract, accepted-advisories and published-params scripts
+        run: node --test actions/published-params/lib.test.mjs actions/published-params/cli.test.mjs actions/cdk-diff/lib.test.mjs actions/cdk-diff/cli.test.mjs actions/preview/lib.test.mjs actions/preview/cli.test.mjs actions/contract/lib.test.mjs actions/contract/cli.test.mjs actions/accepted-advisories/lib.test.mjs actions/accepted-advisories/cli.test.mjs
       # Fails when an entry of accepted-advisories.json is past its date or lacks a field. The message names the entry.
       # This check reads the clock, so it fails on its own when a date passes. Renew the entry or remove it.
       - name: check the list of accepted advisories

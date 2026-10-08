@@ -5,6 +5,10 @@ description: Deploys one stage from the cloud assembly that the build job made. 
 # - check out the commit of the release, for package-lock.json
 # - put the zipped cloud assembly on the disk
 # - log in to AWS
+#
+# The action also checks the parameters that the service publishes for its consumers (for example /lab/core/url).
+# It reads them before and after the deployment, and it warns if a value changed. It needs ssm:GetParameters on /lab/*,
+# the permission that the preflight check uses. The README section "Provider parameters" explains the check.
 inputs:
   assembly:
     description: The path of the zipped cloud assembly.
@@ -45,11 +49,27 @@ runs:
         rm -rf cdk.out
         unzip -q "$ASSEMBLY" -d cdk.out
 
+    # The two steps of the check of the published parameters never fail the job (the script returns 0, and continue-on-error
+    # is a second guard). A stale consumer is no fault of the provider, and a check that cannot run is no fault of the release.
+    - name: read the published parameters before the deployment
+      continue-on-error: true
+      shell: bash
+      env:
+        STAGE: ${{ inputs.stage }}
+      run: node "$GITHUB_ACTION_PATH/../published-params/cli.mjs" snapshot --assembly cdk.out --stage "$STAGE" --out "$RUNNER_TEMP/published-params-before.json"
+
     - name: cdk deploy
       shell: bash
       env:
         STAGE: ${{ inputs.stage }}
       run: npx cdk deploy --app cdk.out "${STAGE}/*" --require-approval never --outputs-file "$RUNNER_TEMP/cdk-outputs.json"
+
+    - name: compare the published parameters after the deployment
+      continue-on-error: true
+      shell: bash
+      env:
+        STAGE: ${{ inputs.stage }}
+      run: node "$GITHUB_ACTION_PATH/../published-params/cli.mjs" compare --before "$RUNNER_TEMP/published-params-before.json" --stage "$STAGE" --contract contract.json
 
     - name: report the deployed version
       shell: bash
