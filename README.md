@@ -16,6 +16,8 @@ The pipeline has three reusable workflows and several composite actions.
 | `actions/lock-release` | Releases that lock. It never fails the release. |
 | `actions/install-tool` | Installs a tool from a pin: a version, a url and a SHA-256. It checks the download before it uses it. |
 | `actions/changed-paths` | Tells whether a pull request changes a file under some paths, for example `.github/`. |
+| `.github/workflows/diff.yml` | Shows the `cdk diff` against Production as one comment on a pull request, and blocks a delete of a stateful resource. See "The cdk diff comment". |
+| `actions/cdk-diff` | The scripts and the tests behind `diff.yml`. |
 | `actions/secret-scan` | Scans the commits of a pull request for secrets with `gitleaks`. It never prints a secret. |
 
 ## Build once, promote the same artefact
@@ -413,6 +415,103 @@ The service repository must have these things:
 - The GitHub environments `test`, `staging` and `production`. Each one has a secret `AWS_ACCOUNT_ID`.
 - A repository variable `AWS_REGION`.
 - A name that starts with `lab-`. The trust policy of the `github-deploy` role accepts only those repositories.
+
+## The cdk diff comment
+
+Every pull request of a service repository can show what a release would change in Production.
+The reusable workflow `diff.yml` posts the answer as one comment. The comment changes in place on each push, so the pull request never gets a second one.
+
+The comment has one line with the counts, for example `1 to add, 2 to change, 0 to replace, 1 to delete`. The full diff is in a folded block below it.
+
+### The four jobs
+
+A pull request runs code that its author wrote. The workflow keeps that code away from every credential. Four jobs do the work:
+
+| Job | What it holds | What it runs |
+| --- | --- | --- |
+| `gate` | Nothing | A script of this repository. It decides if the diff can run. |
+| `fetch` | The AWS role `github-pr-diff` (an OIDC token) | The code of `diff.yml` only. It reads the deployed template and the version of each stack. |
+| `compute` | Nothing (no AWS credentials, no write token) | The code of the pull request: `npm ci` and `cdk synth`. Then `cdk diff --template`, which needs no AWS access. |
+| `report` | The right to write a comment | A script of this repository. It reads the diff as data. It runs no code of the pull request. |
+
+The jobs pass plain files to each other as workflow artefacts. An artefact of a public repository is public, so `fetch` removes account numbers from the templates before it uploads them.
+
+The role `github-pr-diff` has two read actions on the stacks with a name that starts with `lab-`. Its trust policy checks the `sub` claim and the `job_workflow_ref` claim.
+So only the file `diff.yml` on `main` of this repository can use the role. The README of [lab-platform](https://github.com/jross24/lab-platform) shows the test and the security model.
+
+### The version number is not a change
+
+The synth of a pull request uses the version `0.0.0-dev` by default. A release uses a new version. So the version would show as a change on every pull request.
+The job `fetch` reads the output `Version` of the deployed stack. The job `compute` synthesises with `-c version=<that version>`.
+The comment says which version it used. Set the input `pass-version` to `false` for an app that has no `version` context value.
+
+### The stateful change guard
+
+A delete or a replacement of a resource that holds data can lose that data. The check fails when the diff contains such a change, unless the pull request has the label `destructive-change-approved`.
+
+The list of types is short on purpose. It is `STATEFUL_TYPES` in `actions/cdk-diff/lib.mjs`:
+`AWS::DynamoDB::Table`, `AWS::DynamoDB::GlobalTable`, `AWS::S3::Bucket`, `AWS::RDS::DBInstance`, `AWS::RDS::DBCluster`, `AWS::EFS::FileSystem`, `AWS::Cognito::UserPool`, `AWS::KMS::Key` and `AWS::Logs::LogGroup`.
+A log group is in the list because a deleted log group deletes the history of the service. Add a type to the list when the lab starts to use it.
+
+The guard uses two sources and joins them:
+
+- The text of `cdk diff` shows a replacement. For example, `[~] AWS::DynamoDB::Table Orders Orders replace`. A change of the key schema of a table gives this line.
+- The templates show a delete. A resource of the deployed template that the new template does not have is deleted. With `DeletionPolicy: Retain` CloudFormation only stops to manage it. The guard calls that case an `orphan` and blocks it too.
+  A new logical ID is a delete and a create. CDK gives a new logical ID when someone changes the ID of a construct. This is the usual way to lose a table by accident.
+
+The second source does not depend on the text format of the CLI. If a new CLI changes its text, a delete is still found.
+
+When the check fails, the comment names the resource and the way out: add the label, then re-run the failed job.
+The job reads the labels of the pull request at the time it runs, so a re-run sees the new label. The caller does not listen to label events. A label event would start the whole `pr` workflow again.
+The label has an exact spelling. A person with triage rights can add it, and it stays visible on the pull request.
+
+### A pull request from a fork
+
+GitHub gives the jobs of a fork pull request no secret and no `id-token`. The job `gate` sees that the head repository is not this repository.
+It skips the other jobs and writes a notice with the reason in the log and in the job summary. The check does not fail.
+A Dependabot pull request is skipped for the same reason. So is a repository that has no account secret.
+`gate` runs `decideRun` in `actions/cdk-diff/lib.mjs`. Unit tests cover the fork, the Dependabot, the missing secret and the other events.
+
+The live fork case is not proven. The owner of the lab has one GitHub account, and a user cannot fork his own repository.
+
+### No account number in the comment
+
+A comment is not masked like a log. The workflow removes account numbers in two layers, before it posts and before it writes the job summary:
+
+1. It replaces the account IDs that the job knows (the secret) wherever they appear, even inside a word.
+2. It replaces any other run of 12 digits that has no letter or digit next to it. This catches the account field of an ARN, the name of a role and the name of a bucket.
+
+Both layers run on the whole comment. Unit tests check an ARN, a role name, a bucket name and numbers that are not account IDs, such as a hash or a timestamp.
+The log is masked too: `configure-aws-credentials` runs with `mask-aws-account-id: true`.
+
+### What the pull request needs
+
+| Item | Why |
+| --- | --- |
+| The caller grants `contents: read`, `id-token: write` and `pull-requests: write`. | A reusable workflow cannot get more permission than the caller gives. |
+| The caller passes `secrets: inherit`. | The jobs need the account secret. |
+| A repository secret `PR_ACCOUNT_ID_PRODUCTION` that holds the ID of the Production account. | A pull request job names no GitHub environment, so it cannot read an environment secret. A repository secret is not available to a fork. |
+| A repository variable `AWS_REGION`. | The region of the role. |
+| The label `destructive-change-approved` exists in the repository. | A person must be able to add it. |
+| The stack has the same name as the repository, or the caller sets `stack-names`. | The workflow reads the stack by its name. |
+
+The inputs of `diff.yml` are `stage` (default `Production`), `account-secret`, `stack-names`, `synth-args`, `title`, `key`, `pass-version` and `tools-ref`.
+Each `key` has its own comment on the pull request. The platform repository uses one key for each account.
+
+### Test a change of this workflow before it reaches `main`
+
+The role trusts `diff.yml` on `main` only. To test a branch, use the `dev` account:
+
+1. Deploy the `Platform` stack of lab-platform to `dev` with `-c 'workflowRef=refs/heads/feat/*'`. The README of lab-platform shows the command.
+2. Open a draft pull request in a service repository. Let it call `diff.yml@<your branch>` with `account-secret: PR_ACCOUNT_ID_DEV` and `tools-ref: <your branch>`.
+3. Close the pull request without a merge. Deploy `dev` again without `workflowRef`.
+
+### Facts that differ from what you may expect
+
+- `cdk diff` exits with `0` when it finds differences, although its help text says it returns status 1. Use `--fail` if you want a non-zero exit code.
+- The default `--method auto` of `cdk diff` creates a change set and uses the deploy role. That is a write call. `--method template` uses the lookup role. `--template <file>` needs no AWS call.
+- The lookup role has the managed policy `ReadOnlyAccess`, so it can read S3 objects and DynamoDB items. The diff does not use it.
+- The context value `github.job_workflow_sha` is empty in a reusable workflow, although the documentation lists it. The OIDC claim `job_workflow_sha` has the value.
 
 ## Secrets, variables and OIDC in a reusable workflow
 
