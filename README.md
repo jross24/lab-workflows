@@ -1565,6 +1565,39 @@ Then the job fails with the message "Dependency review is not supported on this 
 The REST API turns the graph on only together with Dependabot alerts (`PUT /repos/{owner}/{repo}/vulnerability-alerts`). It turns the graph off again when you turn the alerts off.
 So the four service repositories have Dependabot alerts on. A new service repository needs the same setting.
 
+### Accepted advisories: a short list with dates
+
+**Why the list exists.** The dependency check judges only what a pull request adds. A new repository has an empty base, so every dependency counts as new.
+Then the check fails on a finding that nobody can fix. This happened to the first pull request of `lab-flags`. `aws-cdk-lib` 2.272.0, the newest release, bundles `brace-expansion` 5.0.9.
+That copy has two high advisories, GHSA-6j4f-fj2g-mc7p and GHSA-qhr7-859c-m2p7, and no patched `aws-cdk-lib` exists ([lab-platform#15](https://github.com/jross24/lab-platform/issues/15)).
+A new repository could not merge its first pull request until someone fixed an upstream package.
+
+**What the list is.** The file `accepted-advisories.json` in the root of this repository holds the advisories that the lab accepts for now. Each entry has five fields, and all five are required:
+
+- `id`: the GitHub advisory id, for example `GHSA-6j4f-fj2g-mc7p`.
+- `package`: the package that the advisory is about.
+- `reason`: one line that says why nobody can fix it now.
+- `issue`: the issue that tracks the fix, written as `owner/repo#number`.
+- `expires`: the last day that the entry applies, written as `YYYY-MM-DD`.
+
+**How the job uses it.** The job `dependencies` runs in the service repository, not in this one. So it checks out this repository into `.lab-tools` at `tools-ref`, the same input that the job `diff` uses.
+The script `actions/accepted-advisories/cli.mjs allowed` reads the file. It passes the ids that have not expired to the input `allow-ghsas` of the action. The action then skips these advisories and no others.
+A new advisory still fails the job. The list does not come from the service repository, so a pull request cannot add an entry to its own check.
+
+**Why each entry has a date.** An exception without an end date stays for ever, and people forget it. The date forces a new decision.
+An entry applies up to and including the day of `expires`. The day after, the script leaves it out. The check `pr / dependencies` fails again on that advisory, and a warning names the entry.
+The `ci` workflow of this repository also fails, with an error that names the entry. It fails the same way when an entry lacks a field or has a wrong value.
+The date may be at most 90 days ahead, so an entry cannot last for years.
+
+**Add an entry.** Open a pull request to this repository and add one object to `accepted-advisories.json`. Check first that no fix exists: no patched version of the package that carries the copy.
+Write the reason in one line. Open an issue that tracks the fix and put its name in `issue`. Choose the nearest date at which someone will look again.
+Run `node actions/accepted-advisories/cli.mjs check` to check the file. The unit tests of the script pass the date to the code, so they do not depend on the clock.
+
+**An exception is a decision, not a way to silence the check.** The issue in `issue` has an owner. The owner decides, before the date, to fix the dependency and remove the entry, or to renew the entry with a new date and a new reason.
+Nobody renews an entry just to make a red check green. The entry applies to the advisory in every repository that calls `pr.yml`. It does not hide the alert in Dependabot, and it does not change `fail-on-severity`.
+
+To test a change of the list before it reaches `main`, follow "Test a change of `pr.yml` before it reaches `main`" below and also pass `tools-ref: <your branch>`. Then the job reads the list of your branch.
+
 ### The secret scan
 
 The lab uses two layers, because each layer has a gap that the other one closes.
@@ -1655,7 +1688,8 @@ The CI of this repository downloads both tools on each run. So a wrong hash or a
 ## Checks of this repository
 
 The `ci` workflow runs on each pull request. It installs `actionlint` and `gitleaks` with `actions/install-tool`.
-It runs the tests of the scripts: next-version, lock, preflight, supersede, propose-rollback, install-tool, changed-paths and secret-scan. It also runs the tests of the Node scripts for the diff comment, the preview and the contract check. The new tests need `jq`, which the runner image has. It also runs `shellcheck` and `actionlint`.
+It runs the tests of the scripts: next-version, lock, preflight, supersede, propose-rollback, install-tool, changed-paths and secret-scan. It also runs the tests of the Node scripts for the diff comment, the preview, the contract check and the accepted advisories. The new tests need `jq`, which the runner image has. It also runs `shellcheck` and `actionlint`.
+The step "check the list of accepted advisories" fails when an entry of `accepted-advisories.json` is past its date or lacks a field.
 
 `actionlint` is not optional. It checks every workflow file in `.github/workflows/`, and it runs `shellcheck` on the `run:` scripts.
 Any finding fails the job `check`. `shellcheck` on the scripts still runs only if the runner image has it, and the image has it today.
