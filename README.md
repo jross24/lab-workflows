@@ -720,7 +720,7 @@ To test both together, core needs the namespace too, and the consumer needs a `c
 | Job | What it holds | What it runs |
 | --- | --- | --- |
 | `plan` | Nothing | A script of this repository. It reads the event and decides: deploy, destroy or nothing. |
-| `build` | Nothing (no AWS credentials, no write token) | The code of the pull request: `npm ci` and `cdk synth` with the namespace. Then a check of the stack name. |
+| `build` | Nothing (no AWS credentials, no write token) | The code of the pull request: `npm ci` and `cdk synth` with the namespace. Before the synth it writes the permissions boundary into `~/.cdk.json`. Then a check of the stack name. |
 | `deploy` | The AWS role `github-preview` | `cdk deploy` of the assembly from `build`. Then a smoke test: the URL must answer HTTP 200. |
 | `destroy` | The AWS role `github-preview`, and the CDK deploy role through it | AWS CLI calls only. It runs no code of the pull request. |
 | `comment` | The right to write the one comment | A script of this repository. |
@@ -755,18 +755,21 @@ What stops harm:
 - **Who can start it.** The trust policy of `github-preview` accepts a token only from a `pull_request` job of a repository `jross24/lab-*`, and only if the job runs the file `preview.yml` of this repository on `main`. A pull request from a fork gets no token. A job in the repository of the pull request, with a workflow of its own, is refused.
 - **What the role can do.** It can assume two roles: the CDK deploy role and the CDK file publishing role of `lab-dev`. It has no other permission.
 - **Code and credentials are apart.** The build runs the code of the pull request and has no credential. The deploy job takes only the finished cloud assembly.
+- **The CloudFormation execution role has a custom policy.** The role of the CDK bootstrap in `lab-dev` has the policy `lab-dev-cfn-execution` and not `AdministratorAccess`. It allows only the resource types of the `Dev` stages (API Gateway, AppConfig, CloudWatch, CodeDeploy, DynamoDB, Lambda, CloudWatch Logs, SSM, X-Ray and IAM roles), for names that start with `lab-`, in one region. A template with an SQS queue, an IAM user or an EC2 instance fails with `AccessDenied`.
+- **Every role of a preview carries a permissions boundary.** The execution policy refuses `iam:CreateRole`, and every action that adds a policy to a role, unless the role carries the policy `lab-dev-boundary`. The boundary has no `sts:AssumeRole`, no IAM and no CloudFormation. So a Lambda function of a preview cannot assume the CDK deploy role. The `build` job writes the boundary into `~/.cdk.json`, and CDK then adds it to each role. Code that ignores the file only makes its own deployment fail.
+- **The identities of the platform are out of reach.** An explicit deny blocks every IAM action on the roles `github-*`, the roles of the CDK bootstrap, the roles of the single sign-on, the OIDC provider, users, groups and the two guardrail policies.
 - **The names are checked.** The build fails unless the assembly holds exactly one stack, `<repository>-pr-<number>`. Code that does not know the namespace makes the baseline name. The deploy job checks again before it has any credential. The destroy job removes a stack only if its tags name this repository and this pull request.
 - **Cost.** A closed pull request removes its preview. The sweeper removes the rest.
 
 What does not stop harm:
 
-- **The CloudFormation execution role has `AdministratorAccess`.** This is the default of `cdk bootstrap`. A template of a pull request can create any resource in `lab-dev`: an IAM user, a large instance, a custom resource that calls any AWS API, even one that removes the baseline.
+- **A template can create the allowed types with any name that starts with `lab-`.** It can create many Lambda functions or DynamoDB tables, and fill the account until a person sees it. It cannot create another type, and a role of it cannot do more than the boundary allows.
 - **The CDK CLI of the pull request runs with the credentials.** The deploy job installs the CLI from the lockfile of the pull request. It can call the CDK deploy role directly, for example `DeleteStack` on a baseline stack. This gives nothing that the template does not give already.
 - **The label is not an authorisation.** A person with write access to the repository can add the label to his own pull request. The label saves cost. It does not protect the account.
 - **There is no budget alarm and no service control policy.** A mistake or an attack can cost money until a person sees it.
 
 The lab accepts this because `lab-dev` is a throwaway account and only the owner can open a pull request in a lab repository.
-A team would add three things: a custom CloudFormation execution policy with a permissions boundary for the bootstrap of the dev account, a service control policy that limits regions and services, and a budget alarm.
+A team would add two more things: a service control policy that limits regions and services, and a budget alarm. The README of [lab-platform](https://github.com/jross24/lab-platform) explains the execution policy and the boundary, and how to apply them.
 
 ### Adopt it in another service
 
