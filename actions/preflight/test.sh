@@ -122,7 +122,8 @@ check_equal 'self: an older release is superseded' 'superseded' "$(self_verdict 
 check_equal 'self: 0.10.0 is not older than 0.9.0' 'newer' "$(self_verdict 0.9.0 0.10.0)"
 
 check_equal 'provider: ok' 'ok' "$(provider_verdict 0.5.1 '>=0.5.0')"
-check_equal 'provider: too old' 'too-old' "$(provider_verdict 0.4.0 '>=0.5.0')"
+check_equal 'provider: too old' 'outside' "$(provider_verdict 0.4.0 '>=0.5.0')"
+check_equal 'provider: too new for an upper bound' 'outside' "$(provider_verdict 2.0.0 '>=0.5.0 <1.0.0')"
 check_equal 'provider: missing' 'missing' "$(provider_verdict '' '>=0.5.0')"
 
 check_equal 'neighbour: absent' 'absent' "$(neighbour_verdict 0.5.2 '' '')"
@@ -331,9 +332,9 @@ contains 'the call asks for the version parameters' '/lab/account/version /lab/c
 setup 'core 0.5.1' 'catalogue 0.2.0' 'account 0.3.1' 'web 0.3.1'
 run_check
 check_equal 'a provider that is too old stops the release' '1' "$status"
-contains 'the message names the provider, the range and the version found' 'web needs catalogue >=0.3.0, but production runs catalogue 0.2.0.' "$output"
+contains 'the message names the provider, the range and the version found' 'web needs catalogue >=0.3.0, but production runs catalogue 0.2.0, which is outside the range.' "$output"
 contains 'the message names the repository to release' 'repository lab-svc-catalogue' "$output"
-contains 'the summary row says failed' '| provider | catalogue | >=0.3.0 | 0.2.0 | FAILED: too old |' "$(cat "$GITHUB_STEP_SUMMARY")"
+contains 'the summary row says failed' '| provider | catalogue | >=0.3.0 | 0.2.0 | FAILED: outside the range |' "$(cat "$GITHUB_STEP_SUMMARY")"
 check_equal 'the result output says fail' 'result=fail' "$(grep result "$GITHUB_OUTPUT")"
 
 setup 'core 0.5.1' 'account 0.3.1' 'web 0.3.1'
@@ -349,6 +350,37 @@ check_equal 'two providers that fail are two errors' '2' "$(grep -c '::error tit
 setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.3.1'
 PF_ENVIRONMENT=staging run_check
 contains 'the title uses the environment' 'deployment to staging: passed' "$(cat "$GITHUB_STEP_SUMMARY")"
+
+setup 'core 0.5.1' 'catalogue 0.2.0' 'account 0.3.1' 'web 0.4.5'
+PF_MODE=redeploy run_check
+check_equal 'in a redeploy a provider that is too old still stops' '1' "$status"
+contains 'the redeploy message names the provider' 'web needs catalogue >=0.3.0' "$output"
+
+setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.4.5'
+PF_MODE=redeploy run_check
+check_equal 'in a redeploy a good case passes, also with a newer version in the environment' '0' "$status"
+
+: > "$FAKE_DEPLOYED"
+run_check
+check_equal 'an environment with no version at all: the providers are missing' '1' "$status"
+check_equal 'an environment with no version at all: both providers are reported' '2' "$(grep -c '::error title=Provider missing' <<< "$output" || true)"
+
+echo '--- check: values in SSM'
+
+setup 'core 0.5.1' 'catalogue dev' 'account 0.3.1' 'web 0.3.1'
+run_check
+check_equal 'a value in SSM that is not a version stops the check' '1' "$status"
+contains 'the message names the parameter and the value' 'The SSM parameter /lab/catalogue/version in production holds "dev"' "$output"
+contains 'the message says that it is not a result of the check' 'This is not a result of the check.' "$output"
+check_equal 'no summary table is written' '' "$(cat "$GITHUB_STEP_SUMMARY")"
+
+setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web v0.3.1'
+run_check
+check_equal 'the own value with a v in front is refused' '1' "$status"
+
+setup 'core 0.5.1' 'catalogue 1.0.0-rc1' 'account 0.3.1' 'web 0.3.1'
+run_check
+check_equal 'a prerelease in SSM is refused' '1' "$status"
 
 echo '--- check: this release against the environment'
 
@@ -430,7 +462,7 @@ setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.3.1'
 run_check
 contains 'no record gives a notice' '::notice title=No tested set::No record of tested versions exists for this release' "$output"
 check_equal 'no record still passes the other checks' '0' "$status"
-PF_ENVIRONMENT=test run_check
+PF_ENVIRONMENT='test' run_check
 if [[ "$output" == *'No tested set'* ]]; then
   echo 'FAIL  in Test there is no record by design, so there is no notice'
   failures=$((failures + 1))
@@ -451,7 +483,7 @@ PF_TESTED_WITH=''
 setup 'core 0.5.1' 'catalogue 0.3.1' 'account 0.3.1' 'web 0.3.1'
 PF_VERSION='' PF_REQUIRES_OVERRIDE='{"core":">=9.9.9"}' run_check
 check_equal 'a requirement that cannot be met stops a dry run' '1' "$status"
-contains 'the dry run names the requirement that failed' 'web needs core >=9.9.9, but production runs core 0.5.1.' "$output"
+contains 'the dry run names the requirement that failed' 'web needs core >=9.9.9, but production runs core 0.5.1, which is outside the range.' "$output"
 lacks 'the dry run without a version has no row for the release' '| this release |' "$(cat "$GITHUB_STEP_SUMMARY")"
 lacks 'the dry run does not compare the file requirements' 'catalogue' "$(cat "$GITHUB_STEP_SUMMARY")"
 

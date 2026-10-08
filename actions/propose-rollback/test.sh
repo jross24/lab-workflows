@@ -51,7 +51,10 @@ mkdir -p "$work/bin"
 cat > "$work/bin/gh" << 'FAKE'
 #!/usr/bin/env bash
 echo "$*" >> "$FAKE_CALLS"
-if [[ -f "$FAKE_FAILS" ]]; then exit 1; fi
+if [[ -f "$FAKE_FAILS" ]]; then
+  echo 'HTTP 422: Workflow does not have workflow_dispatch trigger' >&2
+  exit 1
+fi
 exit 0
 FAKE
 chmod +x "$work/bin/gh"
@@ -73,7 +76,7 @@ run_main() {
 
 check_equal 'no earlier version' 'none' "$(decide 0.4.1 '')"
 check_equal 'the earlier version is this version' 'same' "$(decide 0.4.1 0.4.1)"
-check_equal 'an earlier version that is not a version' 'same' "$(decide 0.4.1 latest)"
+check_equal 'an earlier version that is not a version' 'unknown' "$(decide 0.4.1 latest)"
 check_equal 'an earlier version that is older' 'go-back' "$(decide 0.4.1 0.4.0)"
 check_equal 'the command to redeploy' 'gh workflow run redeploy.yml --repo jross24/lab-web -f version=0.4.0 -f environment=production' \
   "$(redeploy_command jross24/lab-web redeploy.yml 0.4.0)"
@@ -92,7 +95,8 @@ reset
 : > "$FAKE_FAILS"
 run_main
 check_equal 'a redeploy that cannot start is a warning and the script still succeeds' '0' "$status"
-contains 'the log has the warning' '::warning::The redeploy could not be started from this job.' "$output"
+contains 'the log has the warning' '::warning::The redeploy could not be started from this job' "$output"
+contains 'the warning has the reason from GitHub' 'HTTP 422: Workflow does not have workflow_dispatch trigger' "$output"
 contains 'the summary still gives the command' 'gh workflow run redeploy.yml' "$(cat "$GITHUB_STEP_SUMMARY")"
 lacks 'the summary does not claim that the redeploy started' 'I started' "$(cat "$GITHUB_STEP_SUMMARY")"
 
@@ -100,6 +104,11 @@ reset
 PR_PREVIOUS='' run_main
 check_equal 'no earlier version means no redeploy call' '0 0' "$status $(wc -l < "$FAKE_CALLS" | tr -d ' ')"
 contains 'the summary says there is nothing to go back to' 'there is nothing to go back to' "$(cat "$GITHUB_STEP_SUMMARY")"
+
+reset
+PR_PREVIOUS=latest run_main
+check_equal 'an earlier version that is not a version means no redeploy call' '0 0' "$status $(wc -l < "$FAKE_CALLS" | tr -d ' ')"
+contains 'the summary asks for a decision by hand' 'could not be read, so I did not start a redeploy' "$(cat "$GITHUB_STEP_SUMMARY")"
 
 reset
 PR_PREVIOUS=0.4.1 run_main

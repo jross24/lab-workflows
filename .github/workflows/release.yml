@@ -107,19 +107,27 @@ jobs:
             echo
             echo "Cloud assembly sha256: \`${digest}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+      # "overwrite" lets "Re-run all jobs" upload the artefact again. Otherwise a name can be used one time in a run.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cdk-out
           path: cdk-out-${{ needs.version.outputs.tag }}.zip
           if-no-files-found: error
           compression-level: 0
+          overwrite: true
       # The release keeps the assembly, so the redeploy workflow can deploy this version again later.
+      # After "Re-run all jobs" the release exists. Then the step replaces the files, so the release holds the zip that
+      # this attempt deploys, and the SHA-256 in the release matches it.
       - name: attach the cloud assembly to a GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$TAG" "cdk-out-${TAG}.zip" "cdk-out-${TAG}.zip.sha256" \
-            --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" "cdk-out-${TAG}.zip" "cdk-out-${TAG}.zip.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "cdk-out-${TAG}.zip" "cdk-out-${TAG}.zip.sha256" \
+              --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag
+          fi
 
   # Takes the lock of the shared Test environment. It waits when another release holds the lock.
   # The wait is 20 minutes at most, so the job limit is a little longer.
@@ -178,12 +186,12 @@ jobs:
       # After "Re-run failed jobs", lock-test does not run again, and unlock-test of the first attempt released the lock.
       # This step makes sure that this run holds the lock. In the first attempt it is a no-op that starts the expiry again.
       # After a re-run it takes the lock again if Test is free. It does not wait. If another run holds the lock,
-      # the step fails and tells the person to run all jobs again, so that lock-test queues for the lock.
+      # the step fails and tells the person to wait for that run and to re-run the failed jobs again.
       - name: make sure this run holds the lock
         uses: jross24/lab-workflows/actions/lock-acquire@preflight
         with:
           max-wait-minutes: 0
-          fail-hint: 'If this is a re-run of failed jobs, the lock was released in the first attempt and another run holds it now. Run all jobs again, so that lock-test queues for the lock.'
+          fail-hint: 'If this is a re-run of failed jobs, the lock was released in the first attempt and another run holds it now. Wait until that run has ended. Then re-run the failed jobs again.'
       - uses: jross24/lab-workflows/actions/preflight@preflight
         with:
           environment: test
@@ -364,7 +372,9 @@ jobs:
           stage: Staging
           version: ${{ needs.version.outputs.version }}
       # The smoke subset of the E2E suite. It only reads. A failure stops the promotion: deploy-production needs this job.
-      - uses: jross24/lab-e2e/actions/suite@main
+      # With run-e2e set to false the repository has no E2E suite to run, so it has no smoke subset either.
+      - if: ${{ inputs.run-e2e }}
+        uses: jross24/lab-e2e/actions/suite@main
         with:
           environment: staging
           suite: smoke
@@ -444,6 +454,7 @@ jobs:
           version: ${{ needs.version.outputs.version }}
       # The smoke subset of the E2E suite, after the canary has moved all the traffic. It only reads. It changes no data.
       - id: smoke
+        if: ${{ inputs.run-e2e }}
         uses: jross24/lab-e2e/actions/suite@main
         with:
           environment: production

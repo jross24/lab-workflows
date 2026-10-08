@@ -86,10 +86,10 @@ check 'key json' '{"lockId":{"S":"test-environment"}}' "$(key_json test-environm
 check 'item json' '{"lockId":{"S":"test-environment"},"holder":{"S":"jross24/lab-web#1#1"},"acquiredAt":{"N":"10"},"expiresAt":{"N":"1810"}}' \
   "$(item_json test-environment 'jross24/lab-web#1#1' 10 1810)"
 check 'acquire values json' '{":now":{"N":"10"},":run":{"S":"jross24/lab-web#1#"}}' "$(acquire_values_json 10 'jross24/lab-web#1#')"
-check 'release values json' '{":me":{"S":"jross24/lab-web#1#1"}}' "$(release_values_json 'jross24/lab-web#1#1')"
+check 'release values json' '{":run":{"S":"jross24/lab-web#1#"}}' "$(release_values_json 'jross24/lab-web#1#')"
 check 'the acquire condition does not wait for the TTL deletion' \
   'attribute_not_exists(#id) OR #exp < :now OR begins_with(#holder, :run)' "$ACQUIRE_CONDITION"
-check 'the release condition names the holder' '#holder = :me' "$RELEASE_CONDITION"
+check 'the release condition names the run, not the attempt' 'begins_with(#holder, :run)' "$RELEASE_CONDITION"
 
 # --- Part 2: acquire and release in this shell ---
 
@@ -156,8 +156,8 @@ case "$command" in
     if [[ -z "$holder" ]]; then echo None; else printf '%s\t%s\t%s\n' "$holder" "$acquired" "$expires"; fi
     ;;
   delete-item)
-    me="$(json_value "$values" ':me' S)"
-    if [[ -n "$holder" && "$holder" == "$me" ]]; then
+    run="$(json_value "$values" ':run' S)"
+    if [[ -n "$holder" && "$holder" == "$run"* ]]; then
       rm -f "$state/holder" "$state/acquired" "$state/expires"
     else
       echo "$refused" >&2
@@ -397,7 +397,12 @@ contains 'the log warns about the other holder' '::warning::The lock of test-env
 reset
 set_lock 'jross24/lab-web#123#1' 1000000 1001800
 GITHUB_RUN_ATTEMPT=2 run_command release
-check 'attempt 2 does not delete the lock of attempt 1' '0 jross24/lab-web#123#1' "$status $(stored_holder)"
+check 'attempt 2 releases the lock of attempt 1 of the same run' '0 ' "$status $(stored_holder)"
+
+reset
+set_lock 'jross24/lab-web#1234#1' 1000000 1001800
+run_command release
+check 'run 123 does not release the lock of run 1234' '0 jross24/lab-web#1234#1' "$status $(stored_holder)"
 
 reset
 set_lock 'jross24/lab-web#123#1' 1000000 1001800

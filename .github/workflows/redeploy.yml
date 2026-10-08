@@ -134,7 +134,7 @@ jobs:
         uses: jross24/lab-workflows/actions/lock-acquire@preflight
         with:
           max-wait-minutes: 0
-          fail-hint: 'If this is a re-run of failed jobs, the lock was released in the first attempt and another run holds it now. Run all jobs again, so that the job lock queues for the lock.'
+          fail-hint: 'If this is a re-run of failed jobs, the lock was released in the first attempt and another run holds it now. Wait until that run has ended. Then re-run the failed jobs again.'
       - uses: jross24/lab-workflows/actions/preflight@preflight
         with:
           environment: ${{ inputs.environment }}

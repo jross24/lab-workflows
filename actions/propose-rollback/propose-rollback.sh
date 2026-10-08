@@ -13,12 +13,16 @@ set -euo pipefail
 
 readonly VERSION_PATTERN='^[0-9]+\.[0-9]+\.[0-9]+$'
 
-# decide <version> <previous>   Prints one word: none (no earlier version), same (the earlier version is this one), or go-back.
+# decide <version> <previous>
+# Prints one word: none (no earlier version), unknown (the earlier version is not a version), same (the earlier version
+# is this one), or go-back.
 decide() {
   local version="$1" previous="$2"
   if [[ -z "$previous" ]]; then
     echo none
-  elif [[ ! "$previous" =~ $VERSION_PATTERN || "$previous" == "$version" ]]; then
+  elif [[ ! "$previous" =~ $VERSION_PATTERN ]]; then
+    echo unknown
+  elif [[ "$previous" == "$version" ]]; then
     echo same
   else
     echo go-back
@@ -32,7 +36,7 @@ redeploy_command() {
 
 main() {
   local repository="${GITHUB_REPOSITORY:-}" service="${PR_SERVICE:-}" version="${PR_VERSION:-}" previous="${PR_PREVIOUS:-}"
-  local workflow="${PR_WORKFLOW:-redeploy.yml}" what text summary
+  local workflow="${PR_WORKFLOW:-redeploy.yml}" what text summary reason
 
   what="$(decide "$version" "$previous")"
   echo "::error title=Smoke check failed in production::The smoke check failed after $service $version was deployed to production. The canary has finished, so the new version carries all the traffic."
@@ -41,15 +45,19 @@ main() {
     none)
       text="Production had no version of $service before this release, so there is nothing to go back to. Fix the fault and release again."
       ;;
+    unknown)
+      text="The version that Production ran before this job could not be read, so I did not start a redeploy. Look at the releases of $service, pick the version to go back to, and start the redeploy by hand."
+      ;;
     same)
       text="Production ran $service $version before this job. There is no older version to go back to. Fix the fault and release again."
       ;;
     go-back)
       text="To go back to $service $previous, run: \`$(redeploy_command "$repository" "$workflow" "$previous")\`. The redeploy waits for the production reviewer."
-      if gh workflow run "$workflow" --repo "$repository" -f "version=$previous" -f environment=production > /dev/null 2>&1; then
-        text="I started the redeploy of $service $previous to production. The run waits for the production reviewer. Approve it to go back. Cancel it if the smoke check was a false alarm. $text"
+      if reason="$(gh workflow run "$workflow" --repo "$repository" -f "version=$previous" -f environment=production 2>&1)"; then
+        text="I started the redeploy of $service $previous to production. The run waits for the production reviewer. Approve it to go back. Cancel it if the smoke check was a false alarm. If the drill variable E2E_FAULT_DRILL is set, remove it first, or the smoke check of the redeploy fails too. $text"
       else
-        echo "::warning::The redeploy could not be started from this job. Start it by hand with the command in the summary."
+        reason="$(head -n 1 <<< "$reason")"
+        echo "::warning::The redeploy could not be started from this job (${reason:-no message}). Start it by hand with the command in the summary."
       fi
       ;;
   esac

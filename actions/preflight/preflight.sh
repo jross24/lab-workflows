@@ -138,7 +138,7 @@ self_verdict() {
   esac
 }
 
-# provider_verdict <deployed> <range>   Prints missing, too-old or ok.
+# provider_verdict <deployed> <range>   Prints missing, outside or ok. "outside" means too old, or too new for an upper bound.
 provider_verdict() {
   local deployed="$1" range="$2"
   if [[ -z "$deployed" ]]; then
@@ -146,7 +146,7 @@ provider_verdict() {
   elif satisfies "$deployed" "$range"; then
     echo ok
   else
-    echo too-old
+    echo outside
   fi
 }
 
@@ -461,6 +461,14 @@ check() {
     echo "::error::The versions in $environment could not be read from SSM. This is not a result of the check. Check the AWS login and the permission ssm:GetParameters on /lab/*." >&2
     return 1
   fi
+  # A value that is not a version would give a wrong answer: bash reads it as 0 in a comparison. Stop and say so.
+  while IFS=$'	' read -r name found; do
+    [[ -n "$name" ]] || continue
+    if ! valid_version "$found"; then
+      echo "::error::The SSM parameter /lab/$name/version in $environment holds \"$found\", which is not a version of the form 1.2.3. This is not a result of the check. Only a stack writes this parameter. Deploy $name again through the pipeline." >&2
+      return 1
+    fi
+  done <<< "$deployed"
   own="$(lookup "$service" "$deployed")"
 
   # 1. This release against the environment: the environment must not go back.
@@ -488,9 +496,9 @@ check() {
     verdict="$(provider_verdict "$found" "$range")"
     case "$verdict" in
       ok) add_row 'provider' "$name" "$range" "$found" 'ok' ;;
-      too-old)
-        add_row 'provider' "$name" "$range" "$found" 'FAILED: too old'
-        fail 'Provider too old' "$service needs $name $range, but $environment runs $name $found. Release $name to $environment first (repository $(repository_of "$name")), then run this job again."
+      outside)
+        add_row 'provider' "$name" "$range" "$found" 'FAILED: outside the range'
+        fail 'Provider outside the range' "$service needs $name $range, but $environment runs $name $found, which is outside the range. Put a version of $name that is inside the range into $environment first (repository $(repository_of "$name")), then run this job again."
         ;;
       missing)
         add_row 'provider' "$name" "$range" 'none' 'FAILED: not deployed'

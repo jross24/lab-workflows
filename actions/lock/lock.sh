@@ -128,13 +128,14 @@ acquire_values_json() {
   printf '{":now":{"N":"%s"},":run":{"S":"%s"}}' "$1" "$2"
 }
 
-# Only the holder can delete the lock.
-readonly RELEASE_CONDITION='#holder = :me'
+# Only a holder of this run can delete the lock. Any attempt of the run counts, like in the condition to take the lock.
+# A re-run has a new attempt number. If the job that released the lock failed in attempt 1, attempt 2 must still be able to release it.
+readonly RELEASE_CONDITION='begins_with(#holder, :run)'
 readonly RELEASE_NAMES='{"#holder":"holder"}'
 
-# release_values_json <holder>
+# release_values_json <run prefix>
 release_values_json() {
-  printf '{":me":{"S":"%s"}}' "$1"
+  printf '{":run":{"S":"%s"}}' "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -207,7 +208,7 @@ try_delete() {
     --key "$(key_json "$lock_id")" \
     --condition-expression "$RELEASE_CONDITION" \
     --expression-attribute-names "$RELEASE_NAMES" \
-    --expression-attribute-values "$(release_values_json "$holder")" 2> "$error_file" > /dev/null || status=$?
+    --expression-attribute-values "$(release_values_json "$(run_prefix "$holder")")" 2> "$error_file" > /dev/null || status=$?
 
   if [[ "$status" -eq 0 ]]; then
     rm -f "$error_file"
