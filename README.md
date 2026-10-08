@@ -7,8 +7,8 @@ The pipeline has reusable workflows and several composite actions.
 
 | File | What it does |
 | --- | --- |
-| `.github/workflows/pr.yml` | Checks a pull request: lint, typecheck, tests, `cdk synth`, a dependency check, a secret scan, `actionlint` and the `cdk diff` comment. Only the diff job has AWS access, and it can only read. |
-| `.github/workflows/release.yml` | Releases a push to `main`: version tag, one build, then Test (with the lock and the E2E gate), Staging and Production. Each environment has checks before the deployment and a smoke check after it. |
+| `.github/workflows/pr.yml` | Checks a pull request: lint, typecheck, tests, `cdk synth`, a dependency check, a secret scan, `actionlint`, the contract check and the `cdk diff` comment. Only the diff job has AWS access, and it can only read. |
+| `.github/workflows/release.yml` | Releases a push to `main`: version tag, one build, then Test (with the lock and the E2E gate), Staging and Production. Each environment has checks before the deployment and a smoke check after it. After Production it records the version on the release (the production marker). |
 | `.github/workflows/redeploy.yml` | Deploys an old release again. This is the rollback path. It takes the Test lock for Test. |
 | `.github/workflows/check.yml` | A dry run of the checks before a deployment. It deploys nothing. |
 | `actions/pipeline-info` | Reads `pipeline.json` of the service repository and gives the name of the service. |
@@ -30,6 +30,7 @@ The pipeline has reusable workflows and several composite actions.
 | `actions/secret-scan` | Scans the commits of a pull request for secrets with `gitleaks`. It never prints a secret. |
 | `actions/contract-check` | Checks the files `contract.json` and `expectations.json` of a service against the releases that run in Production. It needs no AWS access. See "Contract tests". |
 | `actions/contract` | The scripts and the tests behind `contract-check`. |
+| `actions/record-production` | Writes the production marker `deployed-production.json` and uploads it to the GitHub release. See "Contract tests". |
 
 ## Build once, promote the same artefact
 
@@ -58,7 +59,7 @@ You can also compare the result in AWS. The `CodeSha256` of the Lambda function 
 `release.yml` runs these jobs in this order:
 
 1. `version` reads `pipeline.json`, works out the next version and creates the tag on the released commit.
-2. `build` runs `npm ci`, lint, typecheck, the tests and one `cdk synth -c version=<version>`. It uploads the zip as a workflow artefact. It also attaches the zip to a GitHub release with the name of the tag.
+2. `build` runs `npm ci`, lint, typecheck, the tests and one `cdk synth -c version=<version>`. It uploads the zip as a workflow artefact. It also attaches the zip to a GitHub release with the name of the tag. If the repository has `contract.json` or `expectations.json`, it attaches them too.
 3. `lock-test` takes the lock of the Test environment. It waits when another release holds the lock.
 4. `deploy-test` makes sure that this run holds the lock, runs the checks before a deployment, and deploys the stage `Test` in the GitHub environment `test`.
 5. `e2e` runs the end-to-end suite of [lab-e2e](https://github.com/jross24/lab-e2e) against Test.
@@ -67,6 +68,7 @@ You can also compare the result in AWS. The `CodeSha256` of the Lambda function 
 8. `deploy-staging` runs the checks, deploys the stage `Staging` in the GitHub environment `staging`, and runs the smoke subset of the E2E suite. It starts only if `e2e` and `tested-set` passed. With `run-e2e: false` it starts after `deploy-test` passed.
 9. `supersede` cancels the older releases of this repository that still wait for the production reviewer.
 10. `deploy-production` runs the checks, deploys the stage `Production` in the GitHub environment `production`, and runs the smoke subset. If the smoke subset fails, it proposes the way back.
+11. `record-production` runs only if `deploy-production` passed. It attaches the production marker `deployed-production.json` to the GitHub release. See "Contract tests".
 
 `e2e-summary` runs when `e2e` ran. It writes the versions that the E2E run tested into the summary of the release. With `run-e2e: false` it does not run.
 
@@ -75,12 +77,13 @@ version -> build -> lock-test -> deploy-test -> e2e -> tested-set --+
                                         \          \-> unlock-test  |
                                          \-------------------------\|
                                                                     v
-                                     deploy-staging -> supersede -> deploy-production
-                                     (checks, deploy, smoke)        (checks, deploy, smoke)
+                                     deploy-staging -> supersede -> deploy-production -> record-production
+                                     (checks, deploy, smoke)        (checks, deploy, smoke)   (marker)
 ```
 
 Each deploy job starts only after the jobs before it passed. With `run-e2e: false`, `deploy-staging` accepts the skipped `e2e` job, but only after `deploy-test` passed.
 If the `production` environment has a required reviewer, `deploy-production` waits until that person approves it.
+`record-production` needs no AWS access and no approval. A failed smoke check fails `deploy-production`, so `record-production` does not run and the release gets no marker.
 
 The jobs are not one queue. Each job that changes an environment has its own concurrency group. The section "Releases in order" explains the groups.
 The caller must not set a `concurrency` group for the whole run.
@@ -113,6 +116,7 @@ Each job that waits for something outside the runner has a `timeout-minutes` lim
 | `deploy-staging` | 25 minutes | 15 for the deployment, like Test, and 10 for the checks and the smoke subset. The smoke subset needs about 2 minutes. |
 | `supersede` | 5 minutes | A job of a few seconds. |
 | `deploy-production` | 40 minutes | 30 for the deployment (see below) and 10 for the checks and the smoke subset. |
+| `record-production` | 5 minutes | A job of a few seconds. It uploads one small file. |
 | `redeploy` (in `redeploy.yml`) | 15, 25 or 40 minutes | For Test, Staging or Production. The same limits as the release jobs. |
 | `lock` (in `redeploy.yml`) | 25 minutes | The wait for the Test lock is 20 minutes at most. |
 
@@ -456,9 +460,12 @@ on:
   pull_request:
 permissions:
   contents: read
+  id-token: write # the diff job reads the deployed stack with an OIDC token
+  pull-requests: write # the diff job writes one comment
 jobs:
   pr:
     uses: jross24/lab-workflows/.github/workflows/pr.yml@main
+    secrets: inherit
 ```
 
 ```yaml
@@ -553,6 +560,7 @@ The service repository must have these things:
 - A repository variable `AWS_REGION`.
 - A name that starts with `lab-`. The trust policy of the `github-deploy` role accepts only those repositories.
 - The roles of the services that it reads: `github-deploy` needs `ssm:GetParameters` on `/lab/*` in each account (lab-platform).
+- Optional: `contract.json` for a provider, `expectations.json` for a consumer, and the label `breaking-change-approved` (see "Contract tests").
 
 ## The cdk diff comment
 
@@ -1158,8 +1166,8 @@ The job needs the contract and the expectations of the version that runs in Prod
 3. It picks the release whose marker has the newest `updated_at`.
 4. It downloads `contract.json` or `expectations.json` of that release with `gh api -H 'Accept: application/octet-stream' repos/<owner>/<repository>/releases/assets/<id>`.
 
-The newest marker wins, and not the newest version. A redeploy to Production uploads the marker again, with `--clobber`, on the release that it deploys. So after a rollback the older release has the newest marker.
-The version of `v0.9.0` is higher than the version of `v0.8.0`. If a rollback put `v0.8.0` in Production, the check compares with `v0.8.0`.
+The newest marker wins, and not the newest version. A redeploy to Production must upload the marker again, with `--clobber`, on the release that it deploys. Then after a rollback the older release has the newest marker. The workflow `redeploy.yml` does not do this yet (see "The production marker").
+Version `0.9.0` is newer than `0.8.0`. If a rollback puts `0.8.0` in Production again, the check compares with `0.8.0`.
 
 | Release | Marker uploaded | Production runs |
 | --- | --- | --- |
@@ -1177,6 +1185,25 @@ The lab considered four other ways to find the version in Production:
 | The deployment record of the GitHub environment | The record names the commit of the run. A redeploy runs from `main`, so it names the wrong commit. |
 
 The marker is a plain file next to the files that the check needs. It keeps the history, because each release keeps its own copy. A reader can see it in the release page.
+
+### The production marker
+
+The job `record-production` of `release.yml` writes the marker. It runs after `deploy-production` succeeded. It needs no AWS access and no approval.
+The job calls the action `actions/record-production`. The action writes the file and runs `gh release upload <tag> deployed-production.json --clobber`. The job has the permission `contents: write` and no other.
+
+The file holds the facts of the deployment:
+
+```json
+{"service":"core","version":"0.8.0","tag":"v0.8.0","environment":"production","commit":"<sha>","run":"<run url>","at":"<ISO time>"}
+```
+
+The marker has limits:
+
+- **A failed smoke check leaves no marker.** The smoke check is a step of the job `deploy-production`. If it fails, the job fails and `record-production` does not run. The new version is live then, but the release has no marker. The check still compares with the release that has the newest marker, and so it is one version behind. A later successful release closes the gap.
+- **A redeploy does not write a marker yet.** After a rollback with `redeploy.yml`, the check compares with the release that the rollback left, and not with the release that runs now.
+- **A late re-run moves the marker back.** The time of the upload counts. If a person re-runs `record-production` of an old release after a newer release reached Production, the old release has the newest marker. Re-run the job only right after the deployment.
+- **The marker says "the deployment job passed".** It does not say "the service works". The smoke check covers that.
+- **Old releases have no marker.** Until a release with a marker reaches Production, the check writes notices and compares nothing.
 
 ### The rules for a provider: B1 to B6
 
@@ -1501,6 +1528,7 @@ Actions from other owners are different. This repository pins each of them to a 
 
 `pr.yml` has three jobs next to `check`: `dependencies`, `secrets` and `actionlint`. In a service repository the checks are named `pr / dependencies`, `pr / secrets` and `pr / actionlint`.
 Each job asks only for `contents: read`. So the caller needs no change.
+`pr.yml` has two more jobs: `diff` (see "The cdk diff comment") and `contracts` (see "Contract tests").
 The jobs use the actions of this repository with `@main`, like the release workflow.
 
 ### The dependency check

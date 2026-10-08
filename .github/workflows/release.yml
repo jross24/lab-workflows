@@ -9,7 +9,7 @@ name: release
 # The order of the jobs:
 #   version -> build -> lock-test -> deploy-test -> e2e -> tested-set
 #                                         \          \-> unlock-test
-#                                          \-> (after e2e and tested-set) deploy-staging -> supersede -> deploy-production
+#                                          \-> (after e2e and tested-set) deploy-staging -> supersede -> deploy-production -> record-production
 #
 # - Test is shared by all the service repositories. A release holds the lock of Test from lock-test to unlock-test.
 # - deploy-staging and deploy-production run the checks of the README first (the order of the providers, the tested set,
@@ -18,6 +18,10 @@ name: release
 #   deploy-test passed. A failed suite still releases the lock.
 # - Each job that changes an environment has a concurrency group of its own. So a release that waits for the production
 #   reviewer does not stop the next release from reaching Test and Staging. The README explains the rules.
+# - build attaches contract.json and expectations.json to the GitHub release, when the repository has them.
+#   record-production runs after a successful deployment to Production. It attaches the marker deployed-production.json to
+#   the release. The contract check of a pull request finds the release that runs in Production by the marker.
+#   A failed smoke check fails deploy-production, so a failed release leaves no marker. The README section "Contract tests" explains this.
 on:
   workflow_call:
     inputs:
@@ -118,14 +122,24 @@ jobs:
       # The release keeps the assembly, so the redeploy workflow can deploy this version again later.
       # After "Re-run all jobs" the release exists. Then the step replaces the files, so the release holds the zip that
       # this attempt deploys, and the SHA-256 in the release matches it.
-      - name: attach the cloud assembly to a GitHub release
+      # The release also keeps contract.json and expectations.json, when the repository has them. They are a copy of the
+      # files at the released commit. The contract check of a pull request reads them from the release that runs in Production.
+      - name: attach the cloud assembly and the contract files to a GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          files=("cdk-out-${TAG}.zip" "cdk-out-${TAG}.zip.sha256")
+          for name in contract.json expectations.json; do
+            if [[ -f "$name" ]]; then
+              files+=("$name")
+            else
+              echo "This repository has no $name. The release does not get it."
+            fi
+          done
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release upload "$TAG" "cdk-out-${TAG}.zip" "cdk-out-${TAG}.zip.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$TAG" "cdk-out-${TAG}.zip" "cdk-out-${TAG}.zip.sha256" \
+            gh release create "$TAG" "${files[@]}" \
               --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag
           fi
 
@@ -470,4 +484,27 @@ jobs:
           service: ${{ needs.version.outputs.service }}
           version: ${{ needs.version.outputs.version }}
           previous: ${{ steps.preflight.outputs.previous-version }}
+          token: ${{ github.token }}
+
+  # Records that this release runs in Production now. It attaches the marker deployed-production.json to the GitHub release.
+  # The contract check of a pull request lists the releases and picks the one with the newest marker (README, "Contract tests").
+  # The job runs only after deploy-production succeeded. That includes the smoke check, because the smoke check is a step
+  # of that job. A failed smoke check fails the job, so a failed release leaves no marker. The version is live then,
+  # but the check does not know it. The README states this as a limit.
+  # The job needs no AWS login and no environment, so it needs no approval. It needs contents: write for the upload.
+  # "Re-run failed jobs" of a failed upload is safe: --clobber replaces the file.
+  record-production:
+    needs: [version, deploy-production]
+    if: ${{ !cancelled() && needs.deploy-production.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: jross24/lab-workflows/actions/record-production@main
+        with:
+          service: ${{ needs.version.outputs.service }}
+          version: ${{ needs.version.outputs.version }}
+          tag: ${{ needs.version.outputs.tag }}
+          commit: ${{ github.sha }}
           token: ${{ github.token }}

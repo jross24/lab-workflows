@@ -1,0 +1,41 @@
+name: record production
+description: >-
+  Writes the production marker (the file deployed-production.json) and uploads it to the GitHub release of the version
+  that runs in Production now. Run it after a successful deployment to Production. It needs no AWS access.
+
+# The job that calls this action needs the permission contents: write.
+# The contract check finds the release that runs in Production by the marker. The README section "Contract tests" explains how.
+inputs:
+  service:
+    description: The name of the service, for example core.
+    required: true
+  version:
+    description: The version that runs in Production now, for example 0.8.0.
+    required: true
+  tag:
+    description: The tag of the release, for example v0.8.0.
+    required: true
+  commit:
+    description: The commit of the release. If it is empty, the action reads the commit of the tag.
+    required: false
+    default: ''
+  run-url:
+    description: The URL of the run that deployed. The default is the URL of this run.
+    required: false
+    default: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  token:
+    description: A token that can write to the release, for example github.token.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        RP_SERVICE: ${{ inputs.service }}
+        RP_VERSION: ${{ inputs.version }}
+        RP_TAG: ${{ inputs.tag }}
+        RP_COMMIT: ${{ inputs.commit }}
+        RP_RUN_URL: ${{ inputs.run-url }}
+      run: bash "$GITHUB_ACTION_PATH/record.sh"
