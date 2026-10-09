@@ -135,7 +135,7 @@ Each job that waits for something outside the runner has a `timeout-minutes` lim
 | `version` | 10 minutes | A job of a few seconds. |
 | `build` | 20 minutes | `npm ci`, the tests and `cdk synth` need a few minutes. |
 | `lock-test` | 25 minutes | The wait for the Test lock is 20 minutes at most. |
-| `deploy-test` | 15 minutes | Part of the time budget of the lock (see "The time budget of the lock"). It is 15 and not 10 because the first deployment of CloudWatch Transaction Search in an account waits about 6 minutes for the setting. The checks and the step that makes sure the run holds the lock take a few seconds and are inside the 15. |
+| `deploy-test` | 15 minutes | Part of the time budget of the lock (see "The time budget of the lock"). It is 15 and not 10 because the first deployment of CloudWatch Transaction Search in an account waited about 6 minutes for the setting. The platform stack of lab-platform owns the setting now, and no service deployment creates it, so the limit can go down. The checks and the step that makes sure the run holds the lock take a few seconds and are inside the 15. |
 | `unlock-test` | 5 minutes | A short job. GitHub ends a cancelled job after 5 minutes. |
 | `tested-set` | 5 minutes | A job of a few seconds. It does not hold the lock. |
 | `e2e-summary` | 5 minutes | A job of a few seconds. |
@@ -739,7 +739,7 @@ The lab keeps a long-lived baseline copy of all four services in `lab-dev`. A de
 A preview reads `/lab/core/url` and `/lab/core/api-arn` of the baseline, like every `Dev` stage does. So a preview of the catalogue calls the baseline core.
 
 The trade-off: a preview tests a change of the catalogue against the baseline core, and not against a change of core in a pull request.
-To test both together, core needs the namespace too, and the consumer needs a `coreNamespace` context value. Issue [lab-platform#36](https://github.com/jross24/lab-platform/issues/36) lists the work.
+To test both together, the consumer needs a `coreNamespace` context value. Core has the namespace now ([lab-platform#36](https://github.com/jross24/lab-platform/issues/36)), and account has `coreNamespace` for a copy on a laptop. The preview workflow does not set it. Catalogue has no such value, and none is planned.
 
 ### The jobs
 
@@ -1717,9 +1717,10 @@ The job `dependencies` runs `actions/dependency-review-action` (v5.0.0, pinned t
 It compares the dependency graph of the base commit with the graph of the head commit. It fails when the pull request adds or changes a package that has an advisory of severity `high` or `critical`.
 It checks the scopes `runtime` and `development`, because a build tool also runs in CI. It does not check licences.
 
-**Why this and not `npm audit` with a baseline.** `npm audit` reports a `brace-expansion` copy inside `aws-cdk-lib` ([lab-platform#15](https://github.com/jross24/lab-platform/issues/15)).
-Nobody can fix it, because `aws-cdk-lib` ships that copy inside its own package. A plain `npm audit` stays red for ever.
-A baseline can hide that one finding, but a person must keep the baseline up to date in each repository.
+**Why this and not `npm audit` with a baseline.** `npm audit` reported a `brace-expansion` copy inside `aws-cdk-lib` ([lab-platform#15](https://github.com/jross24/lab-platform/issues/15)).
+A user of the package cannot fix a copy that `aws-cdk-lib` ships inside its own package. So a plain `npm audit` stays red until a new `aws-cdk-lib` comes out.
+`aws-cdk-lib` 2.273.0 fixed this copy (see "Accepted advisories: a short list with dates").
+A baseline can hide such a finding, but a person must keep the baseline up to date in each repository.
 
 The diff tool needs no baseline. The old finding is in the base commit and in the head commit, so it is not in the diff. A new package with an advisory is in the diff, so the job fails.
 The lab tested both cases. A change to the `aws-cdk-lib` entry of the lockfile passed. A new dependency on `minimist` 1.2.5 (critical advisory GHSA-xvch-5gv4-984h) failed.
