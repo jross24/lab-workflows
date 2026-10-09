@@ -1971,6 +1971,7 @@ The owner asked for a check in [lab-platform#26](https://github.com/jross24/lab-
 3. **A check in the pull request.** The job `shared` of `pr.yml` reads the pin. It checks out this repository at the pinned commit, and compares each file below `shared/` with the copy in the service, byte by byte.
    It compares with the PINNED commit and not with `main`. So a pull request never fails because this repository moved. It fails only when someone edits a copy by hand, or forgets a file.
    The message names each file, the pinned commit and the sync command.
+   The ruleset of `main` in each service repository lists `pr / shared` as a required check. A failing check blocks the merge.
 4. **A sync script.** `node actions/shared-files/sync.mjs <path to the service> [commit]` copies the files of a commit into a service and writes the pin. Run it in a clone of this repository.
    The default commit is `origin/main`. The script reads the files from the git objects of the commit, so a dirty file or a line ending setting of your clone cannot change them.
    It removes a file that the old pin owned and the new commit dropped. It never removes another file. It does not commit.
